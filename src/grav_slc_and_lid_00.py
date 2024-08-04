@@ -20,8 +20,8 @@ from matplotlib.ticker import MaxNLocator
 import importlib
 import multiprocessing as mp
 
-import subroutines
-import vis_eulag
+# import subroutines
+# import vis_eulag
 #importlib.reload(subroutines)
 #importlib.reload(vis_eulag)
 #from vis_eulag import *
@@ -32,6 +32,7 @@ import cmaps, plt_helper
 pbar_interval = 5 # %
 surf_factor = 5
 data_folder = "/scratch/b/b309199"
+animation_folder = "../data/animation_slices"
 # data_folder = "/work/bd0620/b309199"
 
 if os.path.exists('latex_default.mplstyle'):
@@ -41,7 +42,7 @@ if os.path.exists('latex_default.mplstyle'):
 def vis_slice_and_lid(t, fpath, image_folder, pbar):
     """Visualize u,v,th or other vars in vertical profiles, different cross sections and virtual lidar time-height diagrams"""
 
-    ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full = preprocess_eulag_output(fpath)
+    ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full = plt_helper.preprocess_eulag_output(fpath)
 
     """Add two simulations"""
     """
@@ -72,8 +73,8 @@ def vis_slice_and_lid(t, fpath, image_folder, pbar):
     
     """Slices"""
     dsxz = ds_xzslices[1]
-    dsyz = ds_yzslices[1]
-    dsxy = ds_xyslices[1]
+    dsyz = ds_yzslices[0]
+    dsxy = ds_xyslices[0]
     dsxz['zcr'] = dsxz['zcr']/1000
     dsyz['zcr'] = dsyz['zcr']/1000
     
@@ -84,7 +85,7 @@ def vis_slice_and_lid(t, fpath, image_folder, pbar):
     # tstamp_ref = tref * ds.nslice * ds.dt00 / 3600
     tstamp     = t    * ds.nslice * ds.dt00 / 3600
 
-    zlim      = [-2,dsxz.zcr.max().values]
+    zlim      = [0,dsxz.zcr.max().values]
     xlim      = [ds.xcr.min().values,ds.xcr.max().values]
     ylim      = [ds.ycr.min().values,ds.ycr.max().values]
     zsponge   = [ds.zab/1000, zlim[1]]
@@ -104,7 +105,7 @@ def vis_slice_and_lid(t, fpath, image_folder, pbar):
     cmap   = cmaps.get_wave_cmap()
     # clev   = [-32,-16,-8,-4,-2,-1,-0.5,0.5,1,2,4,8,16,32]
     # clev_l = [-16,-4,-1,1,4,16]
-    clev, clev_l = subroutines.get_colormap_bins_and_labels(max_level=32)
+    clev, clev_l = plt_helper.get_colormap_bins_and_labels(max_level=32)
     norm = BoundaryNorm(boundaries=clev , ncolors=cmap.N, clip=True)
 
     """Labels"""
@@ -314,14 +315,19 @@ def vis_slice_and_lid(t, fpath, image_folder, pbar):
     ax1.contourf(ds.xcr, ds.ycr, var,
                             cmap=cmap, norm=norm, levels=clev, extend='both')
     ### - Topography - ###
-    if ds.amp < 0:
-        topo_levels=np.linspace(surf_factor*ds.amp,-surf_factor*ds.amp,12)
-    else: 
-        topo_levels=np.linspace(-surf_factor*ds.amp,surf_factor*ds.amp,12)
-    isentropes = ax1.contour(ds.xcr, ds.ycr, surf_factor*dsxy.zcrtopo[t,:,:], colors='k', levels=topo_levels, linewidths=1)
+    ds.attrs["itopo"] = 1
+    if ds.itopo == 1:
+        amp = dsxy.zcrtopo.max()
+        amp = 1200
+        topo_levels=np.linspace(20,surf_factor*amp,3)
+    else:
+        if ds.amp < 0:
+            topo_levels=np.linspace(surf_factor*ds.amp,-surf_factor*ds.amp,12)
+        else: 
+            topo_levels=np.linspace(-surf_factor*ds.amp,surf_factor*ds.amp,12)
+    isentropes = ax1.contour(ds.xcr, ds.ycr, surf_factor*dsxy.zcrtopo[t,:,:], colors='k', levels=topo_levels, linewidths=0.6)
     ##isentropes = ax2.contour(ds.xcr, ds.ycr, -surf_factor*ds_env.zcr[-1,0,:,:], colors='k', levels=topo_levels, linewidths=1)
     
-    ###@cmb include sponge in x and y
     ax1.xaxis.set_minor_locator(AutoMinorLocator())
     ax1.yaxis.set_minor_locator(AutoMinorLocator())
     ax1.tick_params(axis="y",direction="in", pad=-25)
@@ -329,18 +335,19 @@ def vis_slice_and_lid(t, fpath, image_folder, pbar):
     ax1.set_ylabel('spanwise y / km', labelpad=-20)
     ax1.set_xlim(xlim)
     ax1.grid()
-    ## include horizontal line in xz plot and vice versa in xy 
-    ax1.scatter(ds_lid0.xpos, ds_lid0.ypos, s=80, c=ds_lid0.color, marker = "D")
-    ax1.scatter(ds_lid1.xpos, ds_lid1.ypos, s=80, c=ds_lid1.color, marker = "D")
-    ax1.axhline(y=0, color='black', lw=lw_1, ls='--')
+
+    # - Lidar and Slice positions - #
+    ax1.text(ds_lid0.xpos, ds_lid0.ypos, "e", weight='bold', fontsize=6, bbox={"boxstyle" : "circle", "lw":0.4, "facecolor":"white", "edgecolor":"black"})
+    ax1.text(ds_lid1.xpos, ds_lid1.ypos, "h", weight='bold', fontsize=6, bbox={"boxstyle" : "circle", "lw":0.4, "facecolor":"white", "edgecolor":"black"})
+    # ax1.scatter(ds_lid0.xpos, ds_lid0.ypos, s=80, c=ds_lid0.color, marker = "D")
+    # ax1.scatter(ds_lid1.xpos, ds_lid1.ypos, s=80, c=ds_lid1.color, marker = "D")
+    ax1.axhline(y=dsxz.ypos, color='black', lw=lw_1, ls='--')
     ax1.axvline(x=dsyz.xpos, color='black', lw=lw_1, ls='--')
     ax1.text(1-xpp, ypp, f"z: {dsxy.zpos}km", transform=ax1.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     ax1.text(xpp, ypp, numb_str[ipp], transform=ax1.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     ipp += 1
 
     """Sponge layer"""
-    #ax0.axhline(y=48, lw=lw_2,ls='--',color='grey')
-    #ax1.axhline(y=48, lw=lw_2,ls='--',color='grey')
     if zsponge[0] > 0:
         ax0.fill_between(xlim, [zsponge[1],zsponge[1]], [zsponge[0],zsponge[0]], facecolor=c3, alpha=alpha_sponge)
         ax2.fill_between(ylim, [zsponge[1],zsponge[1]], [zsponge[0],zsponge[0]], facecolor=c3, alpha=alpha_sponge)
@@ -348,6 +355,8 @@ def vis_slice_and_lid(t, fpath, image_folder, pbar):
             axlid0.fill_between(xlim_lid, [zsponge[1],zsponge[1]], [zsponge[0],zsponge[0]], facecolor=c3, alpha=alpha_sponge)
         if ilid1 != None:
             axlid1.fill_between(xlim_lid, [zsponge[1],zsponge[1]], [zsponge[0],zsponge[0]], facecolor=c3, alpha=alpha_sponge)
+    ax1.axvspan(ds.xcr[0,0], ds.xcr[0,0]+ds.dxabL/1000, alpha=alpha_sponge, color=c3)
+    ax1.axvspan(ds.xcr[0,-1]-ds.dxabR/1000, ds.xcr[0,-1], alpha=alpha_sponge, color=c3)
     ax1.fill_between(xlim, [ds.ycr[0,0]+ds.dyab/1000,ds.ycr[0,0]+ds.dyab/1000], [ds.ycr[0,0],ds.ycr[0,0]], facecolor=c3, alpha=alpha_sponge)
     ax1.fill_between(xlim, [ds.ycr[-1,0],ds.ycr[-1,0]], [ds.ycr[-1,0]-ds.dyab/1000,ds.ycr[-1,0]-ds.dyab/1000], facecolor=c3, alpha=alpha_sponge)
 
@@ -402,102 +411,26 @@ def plot_virtual_lidar(axlid, ds_lid, tstamp, xlim_lid, zlim, thlev, clev, cmap,
     axlid.set_xlim(xlim_lid)
     axlid.set_ylim(zlim)
     axlid.vlines(x=[tstamp], ymin=zlim[0],ymax=zlim[1], colors='black', lw=2, ls='--')
-    axlid.spines['bottom'].set_color(ds_lid.color)
-    axlid.spines['top'].set_color(ds_lid.color) 
-    axlid.spines['right'].set_color(ds_lid.color)
-    axlid.spines['left'].set_color(ds_lid.color)
-    lw_axlid = 1.5
-    axlid.spines['bottom'].set_linewidth(lw_axlid)
-    axlid.spines['top'].set_linewidth(lw_axlid) 
-    axlid.spines['right'].set_linewidth(lw_axlid)
-    axlid.spines['left'].set_linewidth(lw_axlid)
+    # axlid.spines['bottom'].set_color(ds_lid.color)
+    # axlid.spines['top'].set_color(ds_lid.color) 
+    # axlid.spines['right'].set_color(ds_lid.color)
+    # axlid.spines['left'].set_color(ds_lid.color)
+    # lw_axlid = 1.5
+    # axlid.spines['bottom'].set_linewidth(lw_axlid)
+    # axlid.spines['top'].set_linewidth(lw_axlid) 
+    # axlid.spines['right'].set_linewidth(lw_axlid)
+    # axlid.spines['left'].set_linewidth(lw_axlid)
 
     axlid.text(1-xpp, ypp, f"x: {ds_lid.xpos}km, y: {ds_lid.ypos}km", transform=axlid.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
 
     return axlid
 
 
-def preprocess_eulag_output(fpath):
-    """Process EULAG output"""
-    env_path   = os.path.join(fpath, "env.nc")
-    tapes_path = os.path.join(fpath, "tapes.nc")
-    grid_path  = os.path.join(fpath, "grd.nc")
-    ds_full = xr.open_dataset(tapes_path)
-    ds_env  = xr.open_dataset(env_path)
-    ds      = xr.open_dataset(grid_path)
-    ds      = ds.assign_coords({'xcr':ds['xcr']/1000, 'ycr':ds['ycr']/1000, 'zcr':ds['zcr']/1000})
-    
-    # ---- Sim parameters -------------- # 
-    ds.attrs['bv'] = ds.attrs['bv'].round(3)
-    ds.attrs['nx'] = np.shape(ds_full['w'])[3]
-    ds.attrs['ny'] = np.shape(ds_full['w'])[2]
-    ds.attrs['nz'] = np.shape(ds_full['w'])[1]
-    
-    ds.attrs['cp']=3.5*ds.rg # Earth
-    ds.attrs['cap']=ds.rg/ds.cp
-    ds.attrs['pref00']=101325.
-        
-    """Slice outputs"""
-    # dsxy['zcr'] = dsxy['zcr'] / 1000
-    xzslices = sorted(glob.glob(os.path.join(fpath, "xzslc_*")))
-    yzslices = sorted(glob.glob(os.path.join(fpath, "yzslc_*")))
-    xyslices = sorted(glob.glob(os.path.join(fpath, "xyslc_*")))
-    ds_xzslices = []
-    ds_yzslices = []
-    ds_xyslices = []
-    for slc in xzslices:
-        ds_slc = xr.open_dataset(slc)
-        ds_slc.attrs['j'] = int(slc.split("/")[-1][-8:-3])
-        ds_slc.attrs['ypos'] = (ds_slc.j - ds.ny/2) * ds.dy00/1000
-        # ds.attrs['pref00'] = ds_slc['pr0'].max()
-        
-        # ds_slc = ds_slc.assign_coords({ds_slc.zcr:ds_slc.z})
-        ds_xzslices.append(ds_slc)
-    for slc in yzslices:
-        ds_slc = xr.open_dataset(slc)
-        ds_slc.attrs['i'] = int(slc.split("/")[-1][-8:-3])
-        if ds.ibcx == 0:
-            ds_slc.attrs['xpos'] = (ds_slc.i - ds.nx/2)  * ds.dx00/1000
-        else:
-            ds_slc.attrs['xpos'] = ds_slc.i  * ds.dx00/1000
-        ds_yzslices.append(ds_slc)
-    for slc in xyslices:
-        ds_slc = xr.open_dataset(slc)
-        ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
-        ds_slc.attrs['k'] = int(slc.split("/")[-1][-8:-3])
-        ds_slc.attrs['zpos'] = ds_slc.k * ds.dz00/1000
-        ds_xyslices.append(ds_slc)
-    
-    """Lidar outputs with high temporal resolution"""
-    lid_colors = ["purple", "forestgreen"]
-    lidars = sorted(glob.glob(os.path.join(fpath, "lid_*")))
-    ds_lidars = []
-    for i, lid_file in enumerate(lidars):
-        ds_lid = xr.open_dataset(lid_file)
-        ds_lid['time'] = ds_lid.t * ds.nlid * ds.dt00/3600
-        ds_lid['time'] = ds_lid['time'].expand_dims({'z':ds_lid.z}, axis=1)
-        ds_lid['zcr'] = ds_lid['zcr']/1000
-        
-        loc_str = lid_file.split("/")[-1][:-3]
-        ds_lid.attrs['i'] = int(str(loc_str)[4:9])
-        ds_lid.attrs['j'] = int(str(loc_str)[-5:])
-        if ds.ibcx == 0:
-            ds_lid.attrs['xpos'] = (ds_lid.i - ds.nx/2)  * ds.dx00/1000
-        else:
-            ds_lid.attrs['xpos'] = ds_lid.i * ds.dx00/1000
-        ds_lid.attrs['ypos'] = (ds_lid.j - ds.ny/2) * ds.dy00/1000
-        ds_lid.attrs['color'] = lid_colors[i]
-        ds_lidars.append(ds_lid)
-        
-    return ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full
-
-
-
 if __name__ == '__main__':
     """Generate animation of EULAG simulation based on NETCDF slice and lidar output"""
 
     """Example: 
-        >> python3 eulag_slices.py pata01
+        >> python3 eulag_slices.py pata_trans 50
     """
     
     """Try changing working directory for Crontab"""
@@ -507,10 +440,13 @@ if __name__ == '__main__':
         print('[i]  Working directory already set!')
     
     simulation = sys.argv[1]
-    ncpus = int(sys.argv[2])
+    if len(sys.argv) > 2:
+        ncpus = int(sys.argv[2])
+    else: 
+        ncpus = mp.cpu_count()-2 # use maximum here but check number of tasks --> ntasks
     fpath = os.path.join(data_folder,simulation)
-    image_folder = os.path.join("./data/animation_slices", simulation)
-    ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full = preprocess_eulag_output(fpath)
+    image_folder = os.path.join(animation_folder, simulation)
+    ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full = plt_helper.preprocess_eulag_output(fpath)
 
     """Parallel processing"""
     progress_counter = mp.Manager().Value('i', 0)
@@ -524,7 +460,7 @@ if __name__ == '__main__':
         args_list.append(args)
     pbar['ntasks'] = len(args_list)
 
-    # ncpus = np.min([mp.cpu_count()-2, pbar['ntasks']])
+    ncpus = np.min([ncpus, pbar['ntasks']])
     print(f"[i]  CPUs available: {mp.cpu_count()}")
     print(f"[i]  CPUs for visualization: {ncpus}")
 

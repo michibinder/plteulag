@@ -6,11 +6,20 @@
 ################################################################################
 
 import os
+import glob
 import matplotlib.dates as mdates
 import time
 from datetime import datetime
-import numpy as np
 import imageio.v2 as imageio
+
+import numpy as np
+import xarray as xr
+import scipy
+import pywt
+
+from waveletFunctions import wave_signif, wavelet
+# from statistics import linear_regression
+
 # import logging
 # import warnings
 # warnings.simplefilter("ignore", RuntimeWarning)
@@ -19,6 +28,205 @@ import imageio.v2 as imageio
 
 """Config"""
 pbar_interval = 5 # %
+
+mother = 'MORLET'
+lag1 = 0.72  # lag-1 autocorrelation for red noise background
+sig_lev = 1
+
+def wavelet_1D_decomp(data, dx, dim=0):
+    """1D Wavelet analysis along given dim of 2D array"""
+
+    shape = np.shape(data)
+    lambdax = np.zeros(shape)
+    variance = np.std(data, ddof=1) ** 2
+
+    # pad = 1    # pad the time series with zeroes (recommended)
+    dj = 0.0625  # this will do 4 sub-octaves per octave
+    s0 = 2 * dx  # this says start at a scale of 6 months
+    j1 = 5 / dj  # this says do 7 powers-of-two with dj sub-octaves each
+
+    n = shape[0]
+    m = shape[1]
+    if dim == 0:
+        n0 = n
+        n1 = m
+    else:
+        n0 = m 
+        n1 = n
+    for y in range(0,n1):
+        if dim == 0:
+            narray = data[y,:]
+        else:
+            narray = data[:,y]
+        wave, period, scale, coi = wavelet(narray, dx, dj=dj, s0=s0, J1=j1, mother=mother)
+        power = (np.abs(wave)) ** 2  # / variance # wavelet power spectrum normalized by variance
+
+        # - Significance levels - #
+        signif = wave_signif(([variance]), dt=dx, sigtest=0, scale=scale, lag1=lag1, mother=mother)
+        # expand signif --> (J+1)x(N) array
+        sig95 = signif[:, np.newaxis].dot(np.ones(n)[np.newaxis, :])
+        sig95 = power / sig95  # where ratio > 1, power is significant
+
+        # jvec holds indices of maximum power for each x-location
+        # indices refer to certain wavelengths
+        jvec = np.argmax(power,axis=0)
+        xvec = np.arange(0,len(jvec),1)
+
+        if dim == 0:
+            lambdax[y,:] = np.where(sig95[jvec,xvec] > sig_lev, period[jvec], np.nan)
+        else:
+            lambdax[:,y] = np.where(sig95[jvec,xvec] > sig_lev, period[jvec], np.nan)
+        # lambdax[y,:] = np.where(power[jvec,xvec] > E_THRESHOLD, period[jvec], np.nan) # E_THRESHOLD = 25
+    return lambdax
+
+
+def fft_gaussian_xy(data,nx_avg,ny_avg=None):
+    "Gaussian filter for horizontal 2D plane - eventually split filter for x and y direction"
+    nz=np.shape(data)[0]
+    nx=np.shape(data)[1]
+    # mask = np.isfinite(data)
+    # data = data.fillna(0)
+
+    ## REPLACE NANs AND PAD ##
+    # data = data.ffill(dim='x').bfill(dim='x')
+    # data = data.pad(x=nx_avg, mode="edge")
+    # data = data.pad(x=nx_avg, mode="edge")
+
+    ## FFT ##
+    data=data.drop(['zcr','xcr','ycr','zs','zh','gi'])
+    da_fft = xrft.fft(data) # Fourier Transform w/ numpy.fft-like behavior   
+    
+    ## GAUSSIAN RESPONSE FUNCTION ##
+    response_func_x = np.exp(-da_fft.freq_x**2 * nx_avg**2)
+    da_fft_low = da_fft * response_func_x
+
+    if (ny_avg != None):
+        n_avg = ny_avg
+    else:
+        n_avg = nx_avg
+
+    # n_avg = 2*n_avg
+    response_func_y = np.exp(-da_fft.freq_y**2 * n_avg**2)
+    da_fft_low = da_fft_low * response_func_y
+    
+    ## INVERSE FFT ##
+    data_filtered = xrft.ifft(da_fft_low)
+
+    return data_filtered.real
+
+
+def gaussian_filter_fft(arr, wavelength_x, wavelength_y, res_x, res_y):
+    """
+    Apply a Gaussian filter to a 2D array using FFT with different resolutions and cutoff wavelengths for each dimension.
+
+    Parameters:
+    arr (numpy.ndarray): 2D numpy array to be smoothed.
+    wavelength_x (float): Cutoff wavelength in the x dimension.
+    wavelength_y (float): Cutoff wavelength in the y dimension.
+    res_x (float): Resolution in the x dimension.
+    res_y (float): Resolution in the y dimension.
+
+    Returns:
+    numpy.ndarray: Smoothed 2D array.
+    """
+    # Get the dimensions of the input array
+    nx, ny = arr.shape
+
+    # Create the grid in the frequency domain
+    kx = np.fft.fftfreq(nx, d=res_x)[:, None]
+    ky = np.fft.fftfreq(ny, d=res_y)[None, :]
+    
+    # Calculate the Gaussian filter in the frequency domain using wavelengths
+    sigma_x = wavelength_x / (2.0 * np.pi)
+    sigma_y = wavelength_y / (2.0 * np.pi)
+    gaussian = np.exp(-0.5 * ((kx**2) * (sigma_x**2) + (ky**2) * (sigma_y**2)))
+    
+    # Perform FFT of the input array
+    arr_fft = np.fft.fft2(arr)
+    
+    # Apply the Gaussian filter in the frequency domain
+    arr_fft_filtered = arr_fft * gaussian
+    
+    # Perform inverse FFT to get the smoothed array
+    arr_smoothed = np.fft.ifft2(arr_fft_filtered).real
+    
+    return arr_smoothed
+
+
+def preprocess_eulag_output(fpath):
+    """Process EULAG output"""
+    env_path   = os.path.join(fpath, "env.nc")
+    tapes_path = os.path.join(fpath, "tapes.nc")
+    grid_path  = os.path.join(fpath, "grd.nc") # --> ds
+    ds_full = xr.open_dataset(tapes_path)
+    ds_env  = xr.open_dataset(env_path)
+    ds      = xr.open_dataset(grid_path)
+    ds      = ds.assign_coords({'xcr':ds['xcr']/1000, 'ycr':ds['ycr']/1000, 'zcr':ds['zcr']/1000})
+    
+    # ---- Sim parameters -------------- # 
+    ds.attrs['bv'] = ds.attrs['bv'].round(3)
+    ds.attrs['nx'] = np.shape(ds_full['w'])[3]
+    ds.attrs['ny'] = np.shape(ds_full['w'])[2]
+    ds.attrs['nz'] = np.shape(ds_full['w'])[1]
+    
+    ds.attrs['cp']=3.5*ds.rg # Earth
+    ds.attrs['cap']=ds.rg/ds.cp
+    ds.attrs['pref00']=101325.
+        
+    """Slice outputs"""
+    # dsxy['zcr'] = dsxy['zcr'] / 1000
+    xzslices = sorted(glob.glob(os.path.join(fpath, "xzslc_*")))
+    yzslices = sorted(glob.glob(os.path.join(fpath, "yzslc_*")))
+    xyslices = sorted(glob.glob(os.path.join(fpath, "xyslc_*")))
+    ds_xzslices = []
+    ds_yzslices = []
+    ds_xyslices = []
+    for slc in xzslices:
+        ds_slc = xr.open_dataset(slc)
+        ds_slc.attrs['j'] = int(slc.split("/")[-1][-8:-3])
+        ds_slc.attrs['ypos'] = (ds_slc.j - ds.ny/2) * ds.dy00/1000
+        # ds.attrs['pref00'] = ds_slc['pr0'].max()
+        
+        # ds_slc = ds_slc.assign_coords({ds_slc.zcr:ds_slc.z})
+        ds_xzslices.append(ds_slc)
+    for slc in yzslices:
+        ds_slc = xr.open_dataset(slc)
+        ds_slc.attrs['i'] = int(slc.split("/")[-1][-8:-3])
+        if ds.ibcx == 0:
+            ds_slc.attrs['xpos'] = (ds_slc.i - ds.nx/2)  * ds.dx00/1000
+        else:
+            ds_slc.attrs['xpos'] = ds_slc.i  * ds.dx00/1000
+        ds_yzslices.append(ds_slc)
+    for slc in xyslices:
+        ds_slc = xr.open_dataset(slc)
+        ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+        ds_slc.attrs['k'] = int(slc.split("/")[-1][-8:-3])
+        ds_slc.attrs['zpos'] = ds_slc.k * ds.dz00/1000
+        ds_xyslices.append(ds_slc)
+    
+    """Lidar outputs with high temporal resolution"""
+    lid_colors = ["purple", "forestgreen"]
+    lidars = sorted(glob.glob(os.path.join(fpath, "lid_*")))
+    ds_lidars = []
+    for i, lid_file in enumerate(lidars):
+        ds_lid = xr.open_dataset(lid_file)
+        ds_lid['time'] = ds_lid.t * ds.nlid * ds.dt00/3600
+        ds_lid['time'] = ds_lid['time'].expand_dims({'z':ds_lid.z}, axis=1)
+        ds_lid['zcr'] = ds_lid['zcr']/1000
+        
+        loc_str = lid_file.split("/")[-1][:-3]
+        ds_lid.attrs['i'] = int(str(loc_str)[4:9])
+        ds_lid.attrs['j'] = int(str(loc_str)[-5:])
+        if ds.ibcx == 0:
+            ds_lid.attrs['xpos'] = (ds_lid.i - ds.nx/2)  * ds.dx00/1000
+        else:
+            ds_lid.attrs['xpos'] = ds_lid.i * ds.dx00/1000
+        ds_lid.attrs['ypos'] = (ds_lid.j - ds.ny/2) * ds.dy00/1000
+        ds_lid.attrs['color'] = lid_colors[i]
+        ds_lidars.append(ds_lid)
+        
+    return ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full
+
 
 def timelab_format_func(value, tick_number):
     dt = mdates.num2date(value)
@@ -38,7 +246,7 @@ def major_formatter_lat(x, pos):
     return "%.f°S" % abs(x)
 
 
-def create_animation(image_folder):
+def create_animation(image_folder, animation_name):
     """Create animation (mp4) from pngs"""
 
     filenames        = sorted(os.listdir(image_folder))
@@ -49,7 +257,7 @@ def create_animation(image_folder):
     # writer_options = {'ffmpeg_params': ['-probesize', '100M']}  # Increase probesize to 5MB
     # writer_options = {'ffmpeg_params': ['-probesize', '5000000', '-analyzeduration', '5000000']}
 
-    with imageio.get_writer(os.path.join(image_folder,"animation.mp4"), fps=fps) as writer: # duration=1000*1/fps
+    with imageio.get_writer(os.path.join(image_folder, animation_name), fps=fps) as writer: # duration=1000*1/fps
         for filename in filenames:
             if filename.endswith(".png"):
                 image = imageio.imread(os.path.join(image_folder, filename))
