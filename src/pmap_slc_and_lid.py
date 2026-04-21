@@ -23,6 +23,7 @@ import multiprocessing as mp
 import warnings
 warnings.filterwarnings('ignore')
 
+from cmcrameri import cm
 import cmaps, plt_helper, filter
 
 # USAGE
@@ -31,9 +32,9 @@ import cmaps, plt_helper, filter
 """Config"""
 data_folder = "/scratch/b/b309199"
 # data_folder = "/work/bd0620/b309199/patagonia"
-data_folder = "/work/bd0620/b309199/scratch"
+# data_folder = "/work/bd0620/b309199/scratch"
 pbar_interval = 5 # %
-animation_folder = "../data/animation_slices"
+animation_folder = "../data/pmap-animations"
 
 VERTICAL_CUTOFF = 15 # km (LAMBDA_CUT)
 TEMPORAL_CUTOFF = 8*60 # min (TAU_CUT)
@@ -41,7 +42,7 @@ TEMPORAL_CUTOFF = 8*60 # min (TAU_CUT)
 if os.path.exists('latex_default.mplstyle'):
     plt.style.use('latex_default.mplstyle')
 
-"""Colormap"""
+"""Colormaps"""
 mycmap = {}
 mynorm = {}
 myclev = {}
@@ -52,7 +53,7 @@ xvar = "vorticity"
 # mycmap[xvar] = plt.get_cmap('RdBu')
 mycmap[xvar] = plt.get_cmap('PiYG')
 # clev_vort, clev_l_vort = plt_helper.get_colormap_bins_and_labels(max_level=0.2)
-myclev[xvar] = np.linspace(-90,90,100) * 10**(-3)
+myclev[xvar] = np.linspace(-80,80,100) * 10**(-3)
 myclevl[xvar] = [np.min(myclev[xvar]), np.max(myclev[xvar])]
 mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, clip=True)
 mylabel[xvar] = "Vorticity / s$^{-1}$"
@@ -61,16 +62,17 @@ xvar = "t"
 # mycmap[xvar] = plt.get_cmap('seismic')
 mycmap[xvar] = cmaps.get_wave_cmap()
 # clev_t, clev_l_t = plt_helper.get_colormap_bins_and_labels(max_level=32)
-myclev[xvar] = np.linspace(-25,25,100)
+# myclev[xvar] = np.linspace(-16,16,100)
 # myclev[xvar] = np.linspace(-30,30,100)
-# myclev[xvar] = np.linspace(-8,8,100)
+myclev[xvar] = np.linspace(-12,12,100)
 myclevl[xvar] = [np.min(myclev[xvar]), np.max(myclev[xvar])]
 mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, clip=True)
 mylabel[xvar] = r"T' / K"
 
 xvar = "u"
+mycmap[xvar] = cm.vik
 # mycmap[xvar] = cmaps.get_wave_cmap()
-mycmap[xvar] = plt.get_cmap('RdBu_r')
+# mycmap[xvar] = plt.get_cmap('RdBu_r')
 # myclev[xvar] = np.linspace(-40,40,100)
 myclev[xvar] = np.linspace(-5,5,100)
 myclevl[xvar] = [np.min(myclev[xvar]), np.max(myclev[xvar])]
@@ -78,11 +80,11 @@ mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, cli
 mylabel[xvar] = r"u' / m$\,$s$^{-1}$"
 
 xvar = "w"
-# mycmap[xvar] = plt.get_cmap('PIYG')
-mycmap[xvar] = plt.get_cmap('RdBu_r')
+mycmap[xvar] = cm.vik
+# mycmap[xvar] = plt.get_cmap('RdBu_r')
 # mycmap[xvar] = cmaps.get_wave_cmap()
-# myclev[xvar] = np.linspace(35,35,100)
-myclev[xvar] = np.linspace(-45,45,100)
+myclev[xvar] = np.linspace(-16,16,100)
+# myclev[xvar] = np.linspace(-45,45,100)
 myclevl[xvar] = [np.min(myclev[xvar]), np.max(myclev[xvar])]
 mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, clip=True)
 mylabel[xvar] = r"w / m$\,$s$^{-1}$"
@@ -108,21 +110,23 @@ mylabel[xvar] = r"w / m$\,$s$^{-1}$"
 # cbar_label = r"MF$_x$ / mPa"
 
 
+def get_pmap_bv(cfg):
+    stb00 = cfg.get("ambient_fields", {}).get("stb00", np.nan)
+    return np.sqrt(stb00) if stb00 is not None and stb00 >= 0 else np.nan
+
+
 def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
-    """Visualize u,v,th or other vars in vertical profiles, different cross sections and virtual lidar time-height diagrams"""
+    """Visualize PMAP slices and virtual lidar time-height diagrams."""
     
     global xlim, ylim, zlim, zsponge, thlev, surf_factor, topo_levels, wind_levels, zcut_mf
-    ds, dsxz, dsyz, ds_xyslices = plt_helper.preprocess_eulag_tstep(fpath, t, slices=slices)
+    cfg, dsxz, dsyz, ds_xyslices = plt_helper.preprocess_pmap_tstep(fpath, t, slices=slices)
+    xy_ref = ds_xyslices[0]
 
     """Limits and timestamp and thlev"""
-    zsponge = [ds.zab/1000, dsxz.zcr.max().values]
-    if  ds.attrs["itopo"] == 0:
-        if t == 0:
-            print("[i]  itopo: ", ds.attrs["itopo"], ". Using idealized topography.")
-    else:
-        if t == 0:
-            print("[i]  itopo: ", ds.attrs["itopo"], ". Using realistic topography.")
-    
+    zsponge = [cfg["zmax"] / 1000, dsxz.zcr.max().values]
+
+    ### update region limits (darwin, fitzroy, patagonia)
+    ### combine all settings at one place top of script!
     if region == 'debeto' and var == 'vortex':
         xlim = [-80,100]
         ylim  = [-80,80]
@@ -133,16 +137,16 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
         xlim = [-50,150]
         ylim  = [-100,100]
     else:
-        xlim  = [ds.xcr.min().values,ds.xcr.max().values]
-        ylim  = [ds.ycr.min().values,ds.ycr.max().values]
+        xlim  = [float(xy_ref.xcr.min().values), float(xy_ref.xcr.max().values)]
+        ylim  = [float(xy_ref.ycr.min().values), float(xy_ref.ycr.max().values)]
 
     zcut_mf = 75000
     surf_factor = 5
     thlev = np.exp(4+0.03*np.arange(1,350,5))
     if var == 'vortex':
-        zlim = [45,85]
+        # zlim = [45,85]
         # zlim = [0,85]
-        # zlim = [50,120]
+        zlim = [0,128]
         var1 = 'w'
         var2 = 'vorticity'
         var3 = 't'
@@ -162,7 +166,7 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     elif var == "surf":
         xlim  = [-100,100]
         ylim  = [-100,100]
-        zlim = [0,6]
+        zlim = [0,9]
         var1 = 'u'
         var2 = 't'
         var3 = 't'
@@ -170,18 +174,18 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
         thlev=np.exp(4+0.03*np.arange(40,100,0.2))
     else:
         zlim = [0,dsxz.zcr.max().values]
-        var1 = 'u'
+        var1 = 'w'
         var2 = 'vorticity'
         var3 = 't'
 
-    if ds.itopo == 1:
+    if itopo == 1:
         amp = int(np.max(ds_xyslices[0].zcrtopo))
         topo_levels=np.linspace(20, surf_factor*0.5*amp, 2)
     else:
-        if ds.amp < 0:
-            topo_levels=np.linspace(surf_factor*ds.amp,-surf_factor*ds.amp,12)
+        if amp0 < 0:
+            topo_levels=np.linspace(surf_factor*amp0,-surf_factor*amp0,12)
         else: 
-            topo_levels=np.linspace(-2*surf_factor*ds.amp,2*surf_factor*ds.amp,24)
+            topo_levels=np.linspace(-2*surf_factor*amp0,2*surf_factor*amp0,24)
 
     wind_levels = np.arange(-120,120,10)
 
@@ -244,11 +248,11 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     else:
         iprof = int(np.shape(dsxz['w'].values)[-1]/2)
         if var == 'alima_y':
-            dslid.attrs['xpos'] = dsyz.xpos
+            dslid.attrs['xpos'] = float(np.asarray(dsyz.xpos).item())
             dslid.attrs['ypos'] = alima_locs[t] / 1000
         else:
             dslid.attrs['xpos'] = alima_locs[t] / 1000
-            dslid.attrs['ypos'] = dsxz.ypos
+            dslid.attrs['ypos'] = float(np.asarray(dsxz.ypos).item())
     dslid.attrs['kprof'] = ds_xyslices[0].k
         
     """Wind axis"""
@@ -266,8 +270,8 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     ax_wind.plot(np.mean(dsxz['u'][:,:],axis=1), dsxz.zcr[:,x0], lw=lw_wind, ls='dotted', color='red', label=r'u$_{mean}$')
     # ax_wind.plot(dslidars[0]['u'][3*t,:], dslidars[0]['zcr'][3*t,:], lw=1, ls='dotted', color=cu, label='u')
     ax_wind.plot(dsxz['u'][:,iprof], dsxz.zcr[:,iprof], lw=lws_wind, ls='-', color=cu, label=r'u$_{mtn}$')
-    #cmb ax_wind.plot(dsxz['ve'][:,iprof], dsxz.zcr[:,iprof], lw=lw_wind, ls='--', color=cv, label=r'v$_{env}$')
-    #cmb ax_wind.plot(dsxz['v'][:,iprof], dsxz.zcr[:,iprof], lw=lws_wind, ls='-', color=cv, label=r'v$_{mtn}$')
+    ax_wind.plot(dsxz['ve'][:,iprof], dsxz.zcr[:,iprof], lw=lw_wind, ls='--', color=cv, label=r'v$_{env}$')
+    ax_wind.plot(dsxz['v'][:,iprof], dsxz.zcr[:,iprof], lw=lws_wind, ls='-', color=cv, label=r'v$_{mtn}$')
     ax_wind.set_xlabel('(u,v) / m$\,$s$^{-1}$')
     ax_wind.set_ylabel('altitude z / km')
     ax_wind.set_ylim(zlim)
@@ -293,7 +297,7 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
         uw  = dsxz['w'].values * (dsxz['u'].values-dsxz['ue'].values)
         mfx = dsxz['rh0'].values * uw
         mfx = np.mean(mfx, axis=1)
-        mfx = filter.gaussian_filter_fft_1D(mfx, lambdaz, ds.dz00)
+        mfx = filter.gaussian_filter_fft_1D(mfx, lambdaz, cfg["dz"])
         mfx = mfx * 10**6
         ax_t.plot(mfx, zcr, lw=1.5, ls='-', color="royalblue")
         # ax_t.plot(tenv, zcr, lw=1.5, ls='--', color="coral")
@@ -303,18 +307,18 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
         ax_t.set_xticks([-10**4,-10**2, 10**2])
     elif var == "ep":
         zcr = dsxz['zcr'][:,0].values
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'].values, dsxz['the'].values, dsxz['pprime'].values, dsxz['ppe'].values, ds.cap, ds.pref00)
-        epm = 1/2*(ds.g/ds.bv)**2 * ((tloc-tenv)/tenv)**2
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'].values, dsxz['the'].values, dsxz['pprime'].values, dsxz['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
+        epm = 1/2*(cfg["constants"]["gravity0"]/get_pmap_bv(cfg))**2 * ((tloc-tenv)/tenv)**2
         # epm = plt_helper.gaussian_filter_fft(epm, lambdaz, lambdax, ds.dz00, ds.dx00)
         epm = np.mean(epm, axis=1)
-        epm = filter.gaussian_filter_fft_1D(epm, lambdaz, ds.dz00)
+        epm = filter.gaussian_filter_fft_1D(epm, lambdaz, cfg["dz"])
         ax_t.plot(epm, zcr, lw=1.5, ls='-', color="red")
         # ax_t.plot(tenv, zcr, lw=1.5, ls='--', color="coral")
         ax_t.set_xlabel(r"E$_{pm}$ / J$\,$kg$^{-1}$")
         ax_t.set_xlim([0,2400])
     else:
         zcr = dsxz['zcr'][:,iprof].values
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'][:,iprof].values, dsxz['the'][:,iprof].values, dsxz['pprime'][:,iprof].values, dsxz['ppe'][:,iprof].values, ds.cap, ds.pref00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'][:,iprof].values, dsxz['the'][:,iprof].values, dsxz['pprime'][:,iprof].values, dsxz['ppe'][:,iprof].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
         ax_t.plot(tloc, zcr, lw=lw2, ls='-', color="coral")
         ax_t.plot(tenv, zcr, lw=1.5, ls='--', color="coral")
         ax_t.set_xlabel('T / K')
@@ -348,7 +352,7 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     
     ############## SLICES ##############
     """Plot xz-slice"""
-    ax0, contf_1 = plt_xzslc(ax0, dsxz, ds, var=var1)
+    ax0, contf_1 = plt_xzslc(ax0, dsxz, cfg, var=var1)
     ax0.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
     if var == 'alima_x' or var == 'alima_y':
         ax0.text(dslid.xpos, zlim[0] + 7, '✈', fontsize=30, fontname='DejaVu Sans', ha='center', va='center')
@@ -358,14 +362,14 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     ipp += 1
 
     """Plot virtual lidars"""
-    axlid, contf_3 = plot_vlidar(axlid, dslid, ds, var=var3, t=t)
+    axlid, contf_3 = plot_vlidar(axlid, dslid, cfg, var=var3, t=t)
     axlid.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
 
     axlid.text(xpp, ypp, numb_str[ipp], transform=axlid.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     ipp += 1
         
     """Plot SLICES"""
-    ax1, contf_1 = plt_xyslc(ax1, ds_xyslices[0], ds, var=var1)
+    ax1, contf_1 = plt_xyslc(ax1, ds_xyslices[0], cfg, var=var1)
     ax1.axhline(y=dslid.ypos, color='black', lw=lw1, ls='--')
     ax1.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
     # ax1.text(dslid.xpos, dslid.ypos, "d", weight='bold', fontsize=8, bbox={"boxstyle" : "circle", "lw":0.4, "facecolor":"white", "edgecolor":"black"})
@@ -373,19 +377,19 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
 
     ## - AXES 2 - ##
     if var == 'amtm':        
-        ax2, contf_2 = plt_xyslc(ax2, ds_xyslices[3], ds, var=var2)
+        ax2, contf_2 = plt_xyslc(ax2, ds_xyslices[3], cfg, var=var2)
         ax2.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
         ax2.axhline(y=dslid.ypos, color='black', lw=lw1, ls='--')
         # amtm_domain = 200 
         # ax2.set_xlim(dslid.xpos-amtm_domain/2, dslid.xpos+amtm_domain/2)
         # ax2.set_ylim(dslid.ypos-amtm_domain/2, dslid.ypos+amtm_domain/2)
     elif var == 'alima_x' or var == 'alima_y':
-        ax2, contf_2 = plt_yzslc(ax2, dsyz, ds, var=var2)
+        ax2, contf_2 = plt_yzslc(ax2, dsyz, cfg, var=var2)
         ax2.axvline(x=dslid.ypos, color='black', lw=lw1, ls='--')
         ax2.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
         ax2.text(dslid.ypos, zlim[0] + 7, '✈', fontsize=30, fontname='DejaVu Sans', ha='center', va='center')
     else:
-        ax2, contf_2 = plt_xzslc(ax2, dsxz, ds, var=var2)
+        ax2, contf_2 = plt_xzslc(ax2, dsxz, cfg, var=var2)
         ax2.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
         ax2.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
     ax2.xaxis.set_label_position('bottom')
@@ -398,11 +402,11 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     # ax3.set_ylabel('altitude z / km')
 
     if var == 'amtm':
-        ax3, _ = plt_amtm(ax3, ds_xyslices[1:6], ds, dslid)
+        ax3, _ = plt_amtm(ax3, ds_xyslices[1:6], cfg, dslid)
     elif var == 'alima_x'  or var == 'alima_y':
-        ax3, _ = plt_xyslc(ax3, ds_xyslices[1], ds, var=var3)
+        ax3, _ = plt_xyslc(ax3, ds_xyslices[1], cfg, var=var3)
     else:
-        ax3, _ = plt_xyslc(ax3, ds_xyslices[0], ds, var=var3)
+        ax3, _ = plt_xyslc(ax3, ds_xyslices[0], cfg, var=var3)
     ax3.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
     ax3.axhline(y=dslid.ypos, color='black', lw=lw1, ls='--')
     ax3.set_ylabel('spanwise y / km')
@@ -462,45 +466,43 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     sema.release()
 
 
-def plt_xzslc(ax, dsxz, ds, var='w'):
+def plt_xzslc(ax, dsxz, cfg, var='w'):
     jslc = int(dsxz.j)
 
     if var == "vorticity":
-        cvar = plt_helper.vorticity_xz(dsxz['u'].values, dsxz['w'].values, ds.dx00, ds.dz00)
+        cvar = plt_helper.vorticity_xz(dsxz['u'].values, dsxz['w'].values, cfg["dx"], cfg["dz"])
 
     elif var == "mf":
-        if t==0:
-            print(f"[i]  Filter with $\\lambda_x$ = {lambdax} and $\\lambda_z$={lambdaz}")
         uw   = dsxz['w'].values * (dsxz['u'].values-dsxz['ue'].values)
         mfx  = dsxz['rh0'].values * uw
-        mfx = filter.gaussian_fft_smoothing(mfx, lambdaz, lambdax, ds.dz00, ds.dx00)
-        izcut = int(zcut_mf / ds.dz00)
+        mfx = filter.gaussian_fft_smoothing(mfx, lambdaz, lambdax, cfg["dz"], cfg["dx"])
+        izcut = int(zcut_mf / cfg["dz"])
         mfx[izcut:,:] = mfx[izcut:,:] * 1000
         cvar = mfx*1000
             
     elif var == "ep":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'].values, dsxz['the'].values, dsxz['pprime'].values, dsxz['ppe'].values, ds.cap, ds.pref00)
-        epm = 1/2*(ds.g/ds.bv)**2 * ((tloc-tenv)/tenv)**2
-        epm = filter.gaussian_fft_smoothing(epm, lambdaz, lambdax, ds.dz00, ds.dx00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'].values, dsxz['the'].values, dsxz['pprime'].values, dsxz['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
+        epm = 1/2*(cfg["constants"]["gravity0"]/get_pmap_bv(cfg))**2 * ((tloc-tenv)/tenv)**2
+        epm = filter.gaussian_fft_smoothing(epm, lambdaz, lambdax, cfg["dz"], cfg["dx"])
         epm = np.where(epm>clev[0],epm,np.nan)
         cvar = epm
     elif var == "u":
         cvar = dsxz["u"].values - dsxz["ue"].values
     elif var == "t":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'].values, dsxz['the'].values, dsxz['pprime'].values, dsxz['ppe'].values, ds.cap, ds.pref00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'].values, dsxz['the'].values, dsxz['pprime'].values, dsxz['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
         cvar = tloc - tenv
     else:
         cvar = dsxz[var].values
-        
+
     cmap = mycmap[var]
     norm = mynorm[var]
     clev = myclev[var]
-    contf = ax.contourf(ds.xcr.expand_dims({'z':dsxz.z},axis=0)[:,jslc,:], dsxz.zcr, cvar,
+    contf = ax.contourf(dsxz.xcr, dsxz.zcr, cvar,
                             cmap=cmap, norm=norm, levels=clev, extend='both')
-    ax.contour(ds.xcr.expand_dims({'z':dsxz.z},axis=0)[:,jslc,:], dsxz.zcr, dsxz['the']+dsxz['thprime'], 
+    ax.contour(dsxz.xcr, dsxz.zcr, dsxz['the']+dsxz['thprime'], 
                             colors='k', alpha=0.7, levels=thlev, lw=lw2)
         
-    ax.plot(ds.xcr[jslc], surf_factor*dsxz.zcr[0,:], lw=1.5, color='black')
+    ax.plot(dsxz.xcr[0, :], surf_factor*dsxz.zcr[0,:], lw=1.5, color='black')
     #ax.yaxis.set_major_locator(MultipleLocator(10))
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -513,11 +515,11 @@ def plt_xzslc(ax, dsxz, ds, var='w'):
     ax.set_xlim(xlim)
     ax.set_ylim(zlim)
     ax.tick_params(which='both', top=True, right=True, bottom=False, labelbottom=False, labeltop=True, labelleft=False, labelright=False)
-    ax.text(1-xpp, ypp, f"y: {dsxz.ypos}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
+    ax.text(1-xpp, ypp, f"y: {float(np.asarray(dsxz.ypos).item()):.1f}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     return ax, contf
 
 
-def plt_yzslc(ax, dsyz, ds, var="w"):
+def plt_yzslc(ax, dsyz, cfg, var="w"):
     """Plot xy-slice"""
 
     if var == "mf":
@@ -525,19 +527,19 @@ def plt_yzslc(ax, dsyz, ds, var="w"):
         vw   = dsyz['w'].values * (dsyz['v'].values-dsyz['ve'].values)
         mfx  = dsyz['rh0'].values * uw
         mfy  = dsyz['rh0'].values * vw
-        mfx = filter.gaussian_fft_smoothing(mfx,lambdax, lambdax, ds.dx00, ds.dx00)
-        mfy = filter.gaussian_fft_smoothing(mfy,lambdax, lambdax, ds.dx00, ds.dx00)
+        mfx = filter.gaussian_fft_smoothing(mfx,lambdax, lambdax, cfg["dx"], cfg["dx"])
+        mfy = filter.gaussian_fft_smoothing(mfy,lambdax, lambdax, cfg["dx"], cfg["dx"])
         cvar = mfx*1000
     elif var == "ep":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsyz['thprime'].values, dsyz['the'].values, dsyz['pprime'].values, dsyz['ppe'].values, ds.cap, ds.pref00)
-        epm = 1/2*(ds.g/ds.bv)**2 * ((tloc-tenv)/tenv)**2
-        epm = filter.gaussian_fft_smoothing(epm,lambdax, lambdax, ds.dx00, ds.dx00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsyz['thprime'].values, dsyz['the'].values, dsyz['pprime'].values, dsyz['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
+        epm = 1/2*(cfg["constants"]["gravity0"]/get_pmap_bv(cfg))**2 * ((tloc-tenv)/tenv)**2
+        epm = filter.gaussian_fft_smoothing(epm,lambdax, lambdax, cfg["dx"], cfg["dx"])
         epm = np.where(epm>clev[0],epm,np.nan)
         cvar = epm
     elif var == "u":
         cvar = dsyz["u"] - dsyz["ue"]
     elif var == "t":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsyz['thprime'].values, dsyz['the'].values, dsyz['pprime'].values, dsyz['ppe'].values, ds.cap, ds.pref00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsyz['thprime'].values, dsyz['the'].values, dsyz['pprime'].values, dsyz['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
         cvar = tloc - tenv
     else:
         cvar = dsyz[var].values
@@ -545,12 +547,12 @@ def plt_yzslc(ax, dsyz, ds, var="w"):
     cmap = mycmap[var]
     norm = mynorm[var]
     clev = myclev[var]
-    contf = ax.contourf(ds.ycr.expand_dims({'z':dsyz.z},axis=0)[:,:,islc], dsyz.zcr, cvar, cmap=cmap, norm=norm, levels=clev, extend='both')
-    # ax.contour(ds.ycr.expand_dims({'z':dsyz.z},axis=0)[:,:,islc], dsyz.zcr, dsyz['ue'].values, 
+    contf = ax.contourf(dsyz.ycr, dsyz.zcr, cvar, cmap=cmap, norm=norm, levels=clev, extend='both')
+    # ax.contour(dsyz.ycr, dsyz.zcr, dsyz['ue'].values, 
     #                 colors='black', norm=norm, levels=wind_levels, linewidths=0.5, extend='both')
 
     ### - Topography - ###
-    ax.plot(ds.ycr[:,islc], surf_factor*dsyz.zcr[0,:], lw=1.5, color='black')
+    ax.plot(dsyz.ycr[0, :], surf_factor*dsyz.zcr[0,:], lw=1.5, color='black')
 
     # ax.yaxis.set_major_locator(MultipleLocator(10))
     ax.xaxis.set_minor_locator(AutoMinorLocator())
@@ -560,13 +562,12 @@ def plt_yzslc(ax, dsyz, ds, var="w"):
     ax.set_xlim(ylim)
     ax.set_ylim(zlim)
     ax.grid()
-    ax.text(1-xpp, ypp, f"x: {dsyz.xpos}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
-
+    ax.text(1-xpp, ypp, f"x: {float(np.asarray(dsyz.xpos).item()):.1f}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
 
     return ax, contf
 
 
-def plt_amtm(ax, dsxy_list, ds, dslid):
+def plt_amtm(ax, dsxy_list, cfg, dslid):
     """Plot AMTM measurement (variable is t)"""
 
     weights = [0.0625,0.25,0.375,0.25,0.0625] # Pascal's triangle
@@ -579,21 +580,21 @@ def plt_amtm(ax, dsxy_list, ds, dslid):
     tlocs = []
     tenvs = []
     for dsxy in dsxy_list:
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxy['thprime'].values, dsxy['the'].values, dsxy['pprime'].values, dsxy['ppe'].values, ds.cap, ds.pref00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxy['thprime'].values, dsxy['the'].values, dsxy['pprime'].values, dsxy['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
         tlocs.append(tloc)
         tenvs.append(tenv)
     tloc = sum(w * layer for w, layer in zip(weights, tlocs))
     tenv = sum(w * layer for w, layer in zip(weights, tenvs))
     cvar = tloc - tenv
+    dsxy = dsxy_list[0]
 
     cmap = mycmap[var]
     norm = mynorm[var]
     clev = myclev[var]
-    contf = ax.contourf(ds.xcr, ds.ycr, cvar, cmap=cmap, norm=norm, levels=clev, extend='both')
-    dsxy = dsxy_list[0]
+    contf = ax.contourf(dsxy.xcr, dsxy.ycr, cvar, cmap=cmap, norm=norm, levels=clev, extend='both')
 
     ### - Topography - ###
-    ax.contour(ds.xcr, ds.ycr, surf_factor*dsxy.zcrtopo, colors='k', levels=topo_levels, linewidths=0.3)
+    ax.contour(dsxy.xcr, dsxy.ycr, surf_factor*dsxy.zcrtopo, colors='k', levels=topo_levels, linewidths=0.3)
     
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -611,19 +612,19 @@ def plt_amtm(ax, dsxy_list, ds, dslid):
     return ax, contf
 
 
-def plt_xyslc(ax, dsxy, ds, var="w"):
+def plt_xyslc(ax, dsxy, cfg, var="w"):
     """Plot xy-slice"""
 
     if var == "vorticity":
-        cvar = 5*plt_helper.vorticity_xz(dsxy['v'].values, dsxy['u'].values, ds.dy00, ds.dx00) # dv/dx - du/dy
+        cvar = 5*plt_helper.vorticity_xz(dsxy['v'].values, dsxy['u'].values, cfg["dy"], cfg["dx"]) # dv/dx - du/dy
 
     elif var == "mf":
         uw   = dsxy['w'].values * (dsxy['u'].values-dsxy['ue'].values)
         vw   = dsxy['w'].values * (dsxy['v'].values-dsxy['ve'].values)
         mfx  = dsxy['rh0'].values * uw
         mfy  = dsxy['rh0'].values * vw
-        mfx = filter.gaussian_fft_smoothing(mfx,lambdax, lambdax, ds.dx00, ds.dx00)
-        mfy = filter.gaussian_fft_smoothing(mfy,lambdax, lambdax, ds.dx00, ds.dx00)
+        mfx = filter.gaussian_fft_smoothing(mfx,lambdax, lambdax, cfg["dx"], cfg["dx"])
+        mfy = filter.gaussian_fft_smoothing(mfy,lambdax, lambdax, cfg["dx"], cfg["dx"])
         if dsxy.zpos > zcut_mf / 1000:
             mfx = mfx*1000
         cvar = mfx*1000
@@ -639,15 +640,15 @@ def plt_xyslc(ax, dsxy, ds, var="w"):
         # efx = np.where(np.abs(efy)>0.165,efx,np.nan) # 0.07
         # efy = np.where(np.abs(efy)>0.165,efy,np.nan)
     elif var == "ep":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxy['thprime'].values, dsxy['the'].values, dsxy['pprime'].values, dsxy['ppe'].values, ds.cap, ds.pref00)
-        epm = 1/2*(ds.g/ds.bv)**2 * ((tloc-tenv)/tenv)**2
-        epm = filter.gaussian_fft_smoothing(epm,lambdax, lambdax, ds.dx00, ds.dx00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxy['thprime'].values, dsxy['the'].values, dsxy['pprime'].values, dsxy['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
+        epm = 1/2*(cfg["constants"]["gravity0"]/get_pmap_bv(cfg))**2 * ((tloc-tenv)/tenv)**2
+        epm = filter.gaussian_fft_smoothing(epm,lambdax, lambdax, cfg["dx"], cfg["dx"])
         epm = np.where(epm>clev[0],epm,np.nan)
         cvar = epm
     elif var == "u":
         cvar = dsxy["u"] - dsxy["ue"]
     elif var == "t":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxy['thprime'].values, dsxy['the'].values, dsxy['pprime'].values, dsxy['ppe'].values, ds.cap, ds.pref00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxy['thprime'].values, dsxy['the'].values, dsxy['pprime'].values, dsxy['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
         cvar = tloc - tenv
     else:
         cvar = dsxy[var].values
@@ -655,10 +656,11 @@ def plt_xyslc(ax, dsxy, ds, var="w"):
     cmap = mycmap[var]
     norm = mynorm[var]
     clev = myclev[var]
-    contf = ax.contourf(ds.xcr, ds.ycr, cvar, cmap=cmap, norm=norm, levels=clev, extend='both')
+    contf = ax.contourf(dsxy.xcr, dsxy.ycr, cvar, cmap=cmap, norm=norm, levels=clev, extend='both')
     
     ### - Topography - ###
-    ax.contour(ds.xcr, ds.ycr, surf_factor*dsxy.zcrtopo, colors='k', levels=topo_levels, linewidths=0.3)
+    # print("Topo-Levels", topo_levels)
+    ax.contour(dsxy.xcr, dsxy.ycr, surf_factor*dsxy.zcrtopo, colors='k', levels=topo_levels, linewidths=0.3)
     
     ax.xaxis.set_minor_locator(AutoMinorLocator())
     ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -671,31 +673,31 @@ def plt_xyslc(ax, dsxy, ds, var="w"):
     if region=="darwin":
         ax.plot(-8.8, -61.6, marker='^', mfc='none', mec='black', markersize=10)
 
-    ax.text(1-xpp, ypp, f"z: {dsxy.zpos}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
+    ax.text(1-xpp, ypp, f"z: {float(np.asarray(dsxy.zpos).item()):.1f}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
 
     return ax, contf
 
 
-def plot_vlidar(axlid, dslid, ds, var="t", t=0):
+def plot_vlidar(axlid, dslid, cfg, var="t", t=0):
 
     time_res = (dslid.time[-1] - dslid.time[-2]).values * 60 # min
     if var == "mf":
         uw   = dslid['w'].values * (dslid['u'].values-dslid['ue'].values)
         mfx  = dslid['rh0'].values * uw
-        mfx = filter.gaussian_fft_smoothing(mfx, 2*60, lambdaz, time_res, ds.dz00)
-        izcut = int(zcut_mf / ds.dz00)
+        mfx = filter.gaussian_fft_smoothing(mfx, 2*60, lambdaz, time_res, cfg["dz"])
+        izcut = int(zcut_mf / cfg["dz"])
         mfx[:,izcut:] = mfx[:,izcut:] * 1000
         cvar = mfx*1000
     elif var == "ep":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dslid['thprime'].values, dslid['the'].values, dslid['pprime'].values, dslid['ppe'].values, ds.cap, ds.pref00)
-        epm = 1/2*(ds.g/ds.bv)**2 * ((tloc-tenv)/tenv)**2
-        epm = filter.gaussian_fft_smoothing(epm, 1, lambdaz, 1, ds.dz00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dslid['thprime'].values, dslid['the'].values, dslid['pprime'].values, dslid['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
+        epm = 1/2*(cfg["constants"]["gravity0"]/get_pmap_bv(cfg))**2 * ((tloc-tenv)/tenv)**2
+        epm = filter.gaussian_fft_smoothing(epm, 1, lambdaz, 1, cfg["dz"])
         epm = np.where(epm>clev[0],epm,np.nan)
         cvar = epm
     elif var == "u":
         cvar = dslid["u"] - dslid["ue"]
     elif var == "t":
-        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dslid['thprime'].values, dslid['the'].values, dslid['pprime'].values, dslid['ppe'].values, ds.cap, ds.pref00)
+        tloc, tenv = plt_helper.get_eulag_t_and_tenv(dslid['thprime'].values, dslid['the'].values, dslid['pprime'].values, dslid['ppe'].values, cfg["constants"]["cap"], cfg["constants"]["p0"])
         vert_res = (dslid.zcr[-1,-1] - dslid.zcr[-1,-2]).values
         tprime_bwf15, tbg15 = filter.butterworth_filter(tloc, cutoff=1/VERTICAL_CUTOFF, fs=1/vert_res, order=5, mode='both')
         tprime_bwf_time, tbg_time = filter.butterworth_filter(tprime_bwf15.T, cutoff=1/(0.05*60), fs=1/time_res, order=5, mode='both')
@@ -750,7 +752,7 @@ def plot_vlidar(axlid, dslid, ds, var="t", t=0):
     axlid.axvline(x=[dslid.time[t].values], color='black', lw=lw1, ls='--') # ymin=zlim[0],ymax=zlim[1]
     axt.text(1-xpp, ypp-0.1, f"Time: {int(hrs):02d}:{int(mins):02d}:{int(secs):02d}s ({t:03d})", transform=axt.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     if 'xpos' in dslid.attrs:
-        axt.text(1-xpp, ypp, f"x: {dslid.xpos:.1f}km, y: {dslid.ypos:.1f}km", transform=axt.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
+        axt.text(1-xpp, ypp, f"x: {float(dslid.attrs['xpos']):.1f}km, y: {float(dslid.attrs['ypos']):.1f}km", transform=axt.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
 
     return axlid, contf
 
@@ -813,7 +815,7 @@ def emulate_airplane_measurement(ds, speed=220, xrange=None, dim='xcr'):
 
 
 if __name__ == '__main__':
-    """Generate animation of EULAG simulation based on NETCDF slice and lidar output"""
+    """Generate animation of PMAP simulation based on NETCDF slice output."""
 
     """Example: 
         >> python3 slc_and_lid.py <var> <simulation> <notest>
@@ -823,18 +825,23 @@ if __name__ == '__main__':
         >> python3 slc_and_lid.py alima_x ideal_topo_L20 <notest>
         >> python3 slc_and_lid.py alima_y ideal_topo_L20 <notest>
     """    
-    global region, xlim_lid, test
+    global region, xlim_lid, test, itopo, amp0
     
     var = sys.argv[1]
-    simulation = sys.argv[2]
+    simulation_arg = sys.argv[2]
+    fpath = simulation_arg if os.path.isdir(simulation_arg) else os.path.join(data_folder, simulation_arg)
+    simulation = os.path.basename(os.path.normpath(fpath))
+    inventory = plt_helper.get_slice_inventory(fpath)
+    if inventory["model"] != "pmap":
+        raise ValueError(f"{os.path.basename(__file__)} now only supports PMAP output, got '{inventory['model']}' for {fpath}")
+
     test = True
     if len(sys.argv) > 3:
         if sys.argv[3] == "notest":
             test = False
     region = simulation.split("_")[0]
     ncpus = mp.cpu_count()-2 # use maximum here but check number of tasks --> ntasks
-    ncpus = 75
-    fpath = os.path.join(data_folder, simulation)
+    ncpus = 50
     image_folder = os.path.join(animation_folder, simulation) + "_" + var
     # shutil.rmtree(image_folder, ignore_errors=True)
     if os.path.isdir(image_folder):
@@ -845,58 +852,47 @@ if __name__ == '__main__':
                 pass
 
     """Slices"""
-    if region=="debeto":
-        slices = {"x": 1, "y": 1, "z": [2]} # 7
-        xlid = 11
-        # xlid = 15.4
-        xlim_lid = [4, 6.3] #h
-    elif region=="darwin":
-        xlid = 96 # CORAL - fake
-        xlid = 25 # darwin slice
-        # xlid = 114 # CORAL
-        # xlid = 40 # DARWIN
-        xlim_lid = [2.5, 4] #h
-        slices = {"x": 0, "y": 0, "z": [2]} # 7
-    else:
-        xlid = 0
-        slices = {"x": 0, "y": 0, "z": [5]} # 7
-        xlim_lid = [3, 7.5] #h
-
-    if var=='vortex':
-        xlim_lid = [3.5, 6.25] #h
-        xlim_lid = [3.25, 5.5] #h
-        # slices = {"x": 0, "y": 1, "z": [8]} # 8 is good, 12 highest
-        slices = {"x": 0, "y": 0, "z": [8]} # 8 is good, 12 highest
-    elif var=='surf':
-        xlim_lid = [0, 4] #h
-    if var=='amtm':
-        xlid = 114 # CORAL
-        # xlim_lid = [3.5, 7.5] #h
-        xlim_lid = [5.5, 7.5] #h
-        xlim_lid = [0, 7] #h
-        slices = {"x": 1, "y": 1, "z": [0,1,3,5,7,9]} # AMTM
-    elif var=='alima_x' or var == 'alima_y':
-        xlid = None # CORAL
-        # xlim_lid = [2.5, 4] #h
-        xlim_lid = [2.5, 5] #h
-        slices = {"x": 0, "y": 0, "z": [0,4]}
+    xlim_lid = None
+    xlid = 0
+    # xlid = 100
+    kslice = 4
+    kdefault = min(inventory['z'] - 1, kslice)
+    slices = {"x": 0, "y": 0, "z": [kdefault]}
+    # slices = {"x": 0, "y": 0, "z": [kdefault]}
+    if var == 'alima_x' or var == 'alima_y':
+        xlid = None
+        slices = {"x": 0, "y": 0, "z": [0, kdefault]}
 
     stime = time.time()
     print(f"[i]  Test run (one timestamp): Opening NETCDF files for simulation: {fpath}")
-    print(slices)
+    print("Slices: ", slices)
 
-    dsxz, dsyz = plt_helper.preprocess_eulag_xzyz(fpath, slices=slices)
+    _cfg, dsxz, dsyz = plt_helper.preprocess_pmap_xzyz(fpath, slices=slices)
     elapsed = time.time() - stime
     print(f"[i]  Files loaded in {elapsed / 60:.2f}min.")
 
+    if xlim_lid is None:
+        xlim_lid = [float(dsxz.time.min().values), float(dsxz.time.max().values)]
+
+    amp0 = _cfg.get("define_orography", {}).get("args", {}).get("amplitude", 0.0)
+    itopo = int(0 if amp0 else 1)
+    if itopo == 0:
+            print("[i]  Using idealized topography.")
+    else:
+            print("[i]  Using realistic topography.")
+
     """Lidar location in xz slice"""
     if xlid is not None:
-        ilid = int((xlid - dsxz.xcr.min()) / (dsxz.xcr.max() - dsxz.xcr.min()) * np.shape(dsxz.xcr)[-1])
+        xmin = float(dsxz.xcr.min().values)
+        xmax = float(dsxz.xcr.max().values)
+        if xlid < xmin or xlid > xmax:
+            xlid = float(dsxz.xcr[0, np.shape(dsxz.xcr)[-1] // 2].values)
+        ilid = int((xlid - xmin) / (xmax - xmin) * np.shape(dsxz.xcr)[-1])
         xlid = dsxz.xcr[0,ilid].values
         dslid = dsxz.isel(x=ilid) # x location in km
         dslid.attrs['i'] = ilid 
         dslid.attrs['xpos'] = xlid
-        print(f"[i]  Virtual ground-based lidar profile: i={dslid.i}, j={dslid.j}, x={dslid.xpos}km, y={dslid.ypos}km")
+        # print(f"[i]  Virtual ground-based lidar profile: i={dslid.i}, j={dslid.j}, x={float(dslid.attrs['xpos']):.1f}km, y={float(dslid.attrs['ypos']):.1f}km")
         
     else:
         global alima_locs
@@ -908,15 +904,12 @@ if __name__ == '__main__':
 
     # xlim_lid = [0,ds_xz.time.max().values]
     trange = [np.abs(dsxz.time.values - xlim_lid[0]).argmin(), np.abs(dsxz.time.values - xlim_lid[1]).argmin()]
-    # trange = [700,900]
+    trange = [300,trange[1]]
 
     trange = np.arange(trange[0], trange[1])
     if test:
-        # trange = [647]
-        # trange = [900]
         trange = [len(dsxz.time.values)-1]
-        trange = [985]
-        trange = [932]
+        # trange = [0]
     print(f"Plotting time steps {trange[0]} to {trange[-1]}")
 
     """Parallel processing"""

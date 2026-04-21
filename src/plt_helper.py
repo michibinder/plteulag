@@ -7,6 +7,7 @@
 
 import os
 import glob
+import re
 import matplotlib.dates as mdates
 import time
 from datetime import datetime
@@ -17,7 +18,9 @@ import xarray as xr
 import scipy
 import pywt
 
-from waveletFunctions import wave_signif, wavelet
+import yaml
+
+from plteulag.graveyard.waveletFunctions import wave_signif, wavelet
 # from statistics import linear_regression
 
 # import logging
@@ -32,6 +35,53 @@ pbar_interval = 5 # %
 mother = 'MORLET'
 lag1 = 0.72  # lag-1 autocorrelation for red noise background
 sig_lev = 1
+
+
+def vorticity_xz(u, w, dx, dz):
+    """
+    Compute vorticity for a velocity field in the x-z plane.
+    
+    Parameters:
+        u (2D numpy array): Velocity in the x-direction (shape: Nz, Nx)
+        w (2D numpy array): Velocity in the z-direction (shape: Nz, Nx)
+        dx (float): Grid spacing in the x-direction
+        dz (float): Grid spacing in the z-direction
+        
+    Returns:
+        omega_y (2D numpy array): Vorticity in the y-direction (shape: Nz, Nx)
+    """
+    # Compute derivatives using central differences
+    du_dz = np.gradient(u, dz, axis=0)  # ∂u/∂z
+    dw_dx = np.gradient(w, dx, axis=1)  # ∂w/∂x
+    
+    # Compute vorticity (omega_y = ∂w/∂x - ∂u/∂z)
+    omega_y = dw_dx - du_dz
+    
+    return omega_y
+
+
+def get_scalar_meta(ds, name, default=None):
+    if name in getattr(ds, "attrs", {}):
+        return ds.attrs[name]
+    if hasattr(ds, "variables") and name in ds.variables:
+        value = ds[name].values
+        try:
+            return np.asarray(value).item()
+        except ValueError:
+            return value
+    if default is not None:
+        return default
+    raise KeyError(f"Could not find scalar metadata '{name}'")
+
+
+def get_eulag_t_and_tenv(th, the, p, ppe, cap, pref00):
+    cap = float(np.asarray(cap).item())
+    pref00 = float(np.asarray(pref00).item())
+    thloc = np.asarray(the) + np.asarray(th)
+    ploc = np.asarray(ppe) + np.asarray(p)
+    tloc = thloc * (ploc / pref00) ** cap
+    tenv = np.asarray(the) * (np.asarray(ppe) / pref00) ** cap
+    return tloc, tenv
 
 def wavelet_1D_decomp(data, dx, dim=0):
     """1D Wavelet analysis along given dim of 2D array"""
@@ -80,152 +130,676 @@ def wavelet_1D_decomp(data, dx, dim=0):
     return lambdax
 
 
-def fft_gaussian_xy(data,nx_avg,ny_avg=None):
-    "Gaussian filter for horizontal 2D plane - eventually split filter for x and y direction"
-    nz=np.shape(data)[0]
-    nx=np.shape(data)[1]
-    # mask = np.isfinite(data)
-    # data = data.fillna(0)
+def detect_model_output(fpath):
+    if os.path.exists(os.path.join(fpath, "grd.nc")):
+        return "eulag"
+    if os.path.exists(os.path.join(fpath, "config.yml")) and os.path.exists(os.path.join(fpath, "slices_y.nc")):
+        return "pmap"
+    raise FileNotFoundError(f"Could not detect supported model output in {fpath}")
 
-    ## REPLACE NANs AND PAD ##
-    # data = data.ffill(dim='x').bfill(dim='x')
-    # data = data.pad(x=nx_avg, mode="edge")
-    # data = data.pad(x=nx_avg, mode="edge")
 
-    ## FFT ##
-    data=data.drop(['zcr','xcr','ycr','zs','zh','gi'])
-    da_fft = xrft.fft(data) # Fourier Transform w/ numpy.fft-like behavior   
-    
-    ## GAUSSIAN RESPONSE FUNCTION ##
-    response_func_x = np.exp(-da_fft.freq_x**2 * nx_avg**2)
-    da_fft_low = da_fft * response_func_x
+def _normalize_z_slices(z_slices):
+    if isinstance(z_slices, (int, np.integer)):
+        return [int(z_slices)]
+    return [int(z) for z in z_slices]
 
-    if (ny_avg != None):
-        n_avg = ny_avg
+
+def _get_pmap_reference_path(fpath):
+    """Resolve restart folders like `sim_r1` back to the original `sim` folder."""
+    normalized = os.path.normpath(os.fspath(fpath))
+    dirname, basename = os.path.split(normalized)
+    match = re.match(r"^(?P<base>.+)_r[1-5]$", basename)
+    if not match:
+        return normalized
+
+    reference_path = os.path.join(dirname, match.group("base"))
+    if not os.path.isdir(reference_path):
+        raise FileNotFoundError(
+            f"Could not find reference simulation folder '{reference_path}' for restart folder '{normalized}'."
+        )
+    return reference_path
+
+
+def get_slice_inventory(fpath):
+    model = detect_model_output(fpath)
+    if model == "eulag":
+        return {
+            "model": model,
+            "x": len(sorted(glob.glob(os.path.join(fpath, "yzslc_*")))),
+            "y": len(sorted(glob.glob(os.path.join(fpath, "xzslc_*")))),
+            "z": len(sorted(glob.glob(os.path.join(fpath, "xyslc_*")))),
+        }
+
+    with xr.open_dataset(os.path.join(fpath, "slices_x.nc"), decode_times=False, chunks={}) as dsx:
+        x_count = int(dsx.sizes.get("x", 1))
+    with xr.open_dataset(os.path.join(fpath, "slices_y.nc"), decode_times=False, chunks={}) as dsy:
+        y_count = int(dsy.sizes.get("y", 1))
+    with xr.open_dataset(os.path.join(fpath, "slices_z.nc"), decode_times=False, chunks={}) as dsz:
+        z_count = int(dsz.sizes.get("z", 1))
+    return {"model": model, "x": x_count, "y": y_count, "z": z_count}
+
+
+def sanitize_slice_request(fpath, slices):
+    inventory = get_slice_inventory(fpath)
+
+    def clamp(index, count):
+        if count <= 0:
+            raise ValueError(f"No slice available for count={count}")
+        return max(0, min(int(index), count - 1))
+
+    z_slices = _normalize_z_slices(slices.get("z", [0]))
+    sanitized = {
+        "x": clamp(slices.get("x", 0), inventory["x"]),
+        "y": clamp(slices.get("y", 0), inventory["y"]),
+        "z": [clamp(z, inventory["z"]) for z in z_slices],
+    }
+    return sanitized
+
+
+def _load_pmap_cfg(fpath):
+    with open(os.path.join(fpath, "config.yml"), "r") as stream:
+        cfg = yaml.safe_load(stream)
+
+    cfg["dx"] = (cfg["xmax"] - cfg["xmin"]) / (cfg["nx"]-1)
+    cfg["dy"] = (cfg["ymax"] - cfg["ymin"]) / (cfg["ny"]-1)
+    cfg["dz"] = (cfg["zmax"] - cfg["zmin"]) / (cfg["nz"]-1)
+
+    cfg["constants"]["R"] = cfg["constants"]["Ravo"] * cfg["constants"]["Rbol"]
+    cfg["constants"]["Rd"] = 1000 * cfg["constants"]["R"] / cfg["constants"]["Rmd"]
+    cfg["constants"]["cpd"] = (
+        cfg["constants"]["gamma"] / (cfg["constants"]["gamma"] - 1.0) * cfg["constants"]["Rd"]
+    )
+    cfg["constants"]["Rd_cpd"] = cfg["constants"]["Rd"] / cfg["constants"]["cpd"]
+    cfg["constants"]["cap"] = cfg["constants"]["Rd"] / cfg["constants"]["cpd"]
+    return cfg
+
+
+def _rename_pmap_vars(ds):
+    rename_map = {}
+    for old, new in {
+        "density": "rho",
+        "theta_total": "th",
+        "uvelx": "u",
+        "uvely": "v",
+        "uvelz": "w",
+    }.items():
+        if old in ds:
+            rename_map[old] = new
+    return ds.rename(rename_map) if rename_map else ds
+
+
+def _maybe_hours(time_da):
+    values = np.asarray(time_da.values)
+    if np.issubdtype(values.dtype, np.number):
+        return time_da / 3600
+    return time_da
+
+
+def _broadcast_scalar_field(reference, value):
+    return xr.full_like(reference, value)
+
+
+def _augment_pmap_fields(ds, ds0, cfg):
+    ds = _rename_pmap_vars(ds)
+    ds0 = _rename_pmap_vars(ds0)
+
+    p0 = cfg["constants"]["p0"]
+    cpd_over_rd = cfg["constants"]["cpd"] / cfg["constants"]["Rd"]
+
+    ds["p"] = p0 * ds["exner_total"] ** cpd_over_rd
+    ds0["p"] = p0 * ds0["exner_total"] ** cpd_over_rd
+    ds["pprime"] = ds["p"] - ds0["p"].broadcast_like(ds["p"])
+    ds["thprime"] = ds["th"] - ds0["th"].broadcast_like(ds["th"])
+    ds["rhoprime"] = ds["rho"] - ds0["rho"].broadcast_like(ds["rho"])
+    ds["the"] = ds0["th"].broadcast_like(ds["th"])
+    ds["ppe"] = ds0["p"].broadcast_like(ds["p"])
+    ds["rh0"] = ds0["rho"].broadcast_like(ds["rho"])
+
+    if "u" in ds0:
+        ds["ue"] = ds0["u"].broadcast_like(ds["u"])
     else:
-        n_avg = nx_avg
+        ds["ue"] = _broadcast_scalar_field(ds["th"], cfg["ambient_fields"]["velocity_x"])
 
-    # n_avg = 2*n_avg
-    response_func_y = np.exp(-da_fft.freq_y**2 * n_avg**2)
-    da_fft_low = da_fft_low * response_func_y
+    if "v" in ds and "v" in ds0:
+        ds["ve"] = ds0["v"].broadcast_like(ds["v"])
+    elif "v" in ds:
+        ds["ve"] = _broadcast_scalar_field(ds["v"], cfg["ambient_fields"]["velocity_y"])
+
+    ds["t"] = ds["th"] * (ds["p"] / p0) ** cfg["constants"]["Rd_cpd"]
+    return ds
+
+
+def _prepare_pmap_xz_dataset(ds, y_index):
+    ds = ds.squeeze(drop=True)
+    ds = ds.assign_coords({"time": _maybe_hours(ds["time"]), "x": ds["x"] / 1000, "z": ds["z"] / 1000})
+    ds["zcr"] = ds["zcr"] / 1000
+    ds["xcr"] = xr.DataArray(
+        np.broadcast_to(ds["x"].values, (ds.sizes["z"], ds.sizes["x"])),
+        dims=("z", "x"),
+        coords={"z": ds["z"], "x": ds["x"]},
+    )
+    ypos = float(ds["y"].values) / 1000 if "y" in ds.coords else float(y_index)
+    ds = ds.assign_coords({"j": int(y_index), "ypos": ypos})
+    ds.attrs["j"] = int(y_index)
+    ds.attrs["ypos"] = ypos
+    return ds
+
+
+def _prepare_pmap_yz_dataset(ds, x_index):
+    ds = ds.squeeze(drop=True)
+    ds = ds.assign_coords({"time": _maybe_hours(ds["time"]), "y": ds["y"] / 1000, "z": ds["z"] / 1000})
+    ds["zcr"] = ds["zcr"] / 1000
+    ds["ycr"] = xr.DataArray(
+        np.broadcast_to(ds["y"].values, (ds.sizes["z"], ds.sizes["y"])),
+        dims=("z", "y"),
+        coords={"z": ds["z"], "y": ds["y"]},
+    )
+    xpos = float(ds["x"].values) / 1000 if "x" in ds.coords else float(x_index)
+    ds = ds.assign_coords({"i": int(x_index), "xpos": xpos})
+    ds.attrs["i"] = int(x_index)
+    ds.attrs["xpos"] = xpos
+    return ds
+
+
+def _prepare_pmap_xy_dataset(ds, topo_ds, k_index):
+    ds = ds.squeeze(drop=True)
+    ds = ds.assign_coords({"time": _maybe_hours(ds["time"]), "x": ds["x"] / 1000, "y": ds["y"] / 1000, "z": ds["z"] / 1000})
+    ds["zcr"] = ds["zcr"] / 1000
+
+    x_mesh, y_mesh = np.meshgrid(ds["x"].values, ds["y"].values)
+    ds["xcr"] = xr.DataArray(x_mesh, dims=("y", "x"), coords={"y": ds["y"], "x": ds["x"]})
+    ds["ycr"] = xr.DataArray(y_mesh, dims=("y", "x"), coords={"y": ds["y"], "x": ds["x"]})
+    ds["zcrtopo"] = topo_ds["zcr"].squeeze(drop=True) * 1000
+    # print("Topo Max:", np.max(topo_ds["zcr"].values))
+    zpos = float(ds["z"].values)
+    dz00 = 0.4 # km
+    # ds = ds.assign_coords({"k": int(zpos/dz00), "zpos": zpos})
+    ds.attrs["k"] = int(zpos/dz00)
+    ds.attrs["zpos"] = zpos
+    return ds
+
+
+def _split_pmap_xy_slices(dsxy, topo_ds, slice_indices):
+    if "z" not in dsxy.dims:
+        dsxy = dsxy.expand_dims({"z": [dsxy["z"].item()]})
+
+    dsxy_list = []
+    for pos, k_index in enumerate(slice_indices):
+        dsxy_list.append(_prepare_pmap_xy_dataset(dsxy.isel(z=pos), topo_ds, k_index))
+    return dsxy_list
+
+
+def preprocess_pmap_xzyz(fpath, slices={"x": 0, "y": 0, "z": [0]}):
+    slices = sanitize_slice_request(fpath, slices)
+    cfg = _load_pmap_cfg(fpath)
+
+    dsy = xr.open_dataset(os.path.join(fpath, "slices_y.nc"), decode_times=False, chunks={}).isel(y=slices["y"])
+    dsy0 = xr.open_dataset(os.path.join(fpath, "slices_y.nc"), decode_times=False, chunks={}).isel(y=slices["y"], time=0)
+    dsxz = _prepare_pmap_xz_dataset(_augment_pmap_fields(dsy, dsy0, cfg), slices["y"])
+
+    dsx = xr.open_dataset(os.path.join(fpath, "slices_x.nc"), decode_times=False, chunks={}).isel(x=slices["x"])
+    dsx0 = xr.open_dataset(os.path.join(fpath, "slices_x.nc"), decode_times=False, chunks={}).isel(x=slices["x"], time=0)
+    dsyz = _prepare_pmap_yz_dataset(_augment_pmap_fields(dsx, dsx0, cfg), slices["x"])
+
+    return cfg, dsxz, dsyz
+
+
+def preprocess_pmap_tstep(fpath, t, slices={"x": 0, "y": 0, "z": [0]}):
+    slices = sanitize_slice_request(fpath, slices)
+    cfg = _load_pmap_cfg(fpath)
+    reference_fpath = _get_pmap_reference_path(fpath)
+
+    dsy = xr.open_dataset(os.path.join(fpath, "slices_y.nc"), decode_times=False, chunks={}).isel(time=t, y=slices["y"])
+    dsy0 = xr.open_dataset(os.path.join(reference_fpath, "slices_y.nc"), decode_times=False, chunks={}).isel(time=0, y=slices["y"])
+    dsxz = _prepare_pmap_xz_dataset(_augment_pmap_fields(dsy, dsy0, cfg), slices["y"])
+
+    dsx = xr.open_dataset(os.path.join(fpath, "slices_x.nc"), decode_times=False, chunks={}).isel(time=t, x=slices["x"])
+    dsx0 = xr.open_dataset(os.path.join(reference_fpath, "slices_x.nc"), decode_times=False, chunks={}).isel(time=0, x=slices["x"])
+    dsyz = _prepare_pmap_yz_dataset(_augment_pmap_fields(dsx, dsx0, cfg), slices["x"])
+
+    # z slices can be made more efficient without the list since all in one file
+    # need option to select certain indices
+    dsz = xr.open_dataset(os.path.join(fpath, "slices_z.nc"), decode_times=False, chunks={}).isel(time=t, z=slices["z"])
+    dsz0 = xr.open_dataset(os.path.join(reference_fpath, "slices_z.nc"), decode_times=False, chunks={}).isel(time=0, z=slices["z"])
+    topo_raw = xr.open_dataset(os.path.join(reference_fpath, "slices_z.nc"), decode_times=False, chunks={}).isel(time=0, z=0)
+    dsxy = _augment_pmap_fields(dsz, dsz0, cfg)
+    topo_aug = _augment_pmap_fields(topo_raw, topo_raw, cfg)
+    topo = _prepare_pmap_xy_dataset(topo_aug, topo_aug, 0)
+    ds_xyslices = _split_pmap_xy_slices(dsxy, topo, slices["z"])
+
+    return cfg, dsxz, dsyz, ds_xyslices
+
+
+def preprocess_pmap(fpath, t=-1, slices={"x": 0, "y": 0, "z": [0]}):
+    with open(os.path.join(fpath, "config.yml"), 'r') as stream:
+        cfg = yaml.safe_load(stream)
+        ## TODO: check dx
+        cfg['dx'] = (cfg['xmax'] - cfg['xmin']) / cfg['nx']
+        cfg['dy'] = (cfg['ymax'] - cfg['ymin']) / cfg['ny']
+        cfg['dz'] = (cfg['zmax'] - cfg['zmin']) / cfg['nz']
+        
+        cfg['constants']['R'] = cfg['constants']['Ravo']*cfg['constants']['Rbol']
+        cfg['constants']['Rd'] = 1000 * cfg['constants']['R'] / cfg['constants']['Rmd']
+        cfg['constants']['cpd'] = cfg['constants']['gamma'] / (cfg['constants']['gamma'] - 1.0) * cfg['constants']['Rd']
+        cfg['constants']['Rd_cpd'] = cfg['constants']['Rd'] / cfg['constants']['cpd']
+        
+        # TODO
+        cfg['constants']['cap'] = cfg['constants']['Rd'] / cfg['constants']['cpd']
+        
+        # ds.attrs['cp']=3.5*ds.rg # Earth
+        # ds.attrs['cap']=ds.rg/ds.cp
+        # ds.attrs['cap']=ds.rg/ds.cp
+        
+        # cfg['ambient_fields']['velocity_x']
+        # cfg['define_orography']['args']
+        # cfg['constants']['fcoriolis0']
+        # cfg['constants']['angle0']
+
+    ## XZ
+    # TODO: Add slice index if needed
+    if t is None: 
+        dsxz   = xr.open_dataset(os.path.join(fpath, f"slices_y.nc"), decode_times=False, chunks={}).isel(y=slices['y'])
+    else:
+        dsxz   = xr.open_dataset(os.path.join(fpath, f"slices_y.nc"), chunks={}).isel(time=t, y=slices['y'])
+    dsxz0  = xr.open_dataset(os.path.join(fpath, f"slices_y.nc"), chunks={}).isel(time=0, y=slices['y'])
+    # print(dsxz)
+    try:
+        dsxz  = dsxz.rename({"density":"rho", "theta_total":"th", "uvelx": "u", "uvely": "v", "uvelz": "w"})
+    except:
+        dsxz  = dsxz.rename({"density":"rho", "theta_total":"th"})
+    dsxz0 = dsxz0.rename({"density":"rho", "theta_total":"th"})
+
+    dsxz['p'] =  cfg['constants']['p0'] * dsxz["exner_total"] ** (cfg['constants']['cpd'] / cfg['constants']['Rd']) # (cp / Rd)
+    dsxz0['p'] =  cfg['constants']['p0'] * dsxz0["exner_total"] ** (cfg['constants']['cpd'] / cfg['constants']['Rd']) # (cp / Rd)
+    dsxz['pprime']=dsxz['p'] - dsxz0['p'].values
+    dsxz['thprime']=dsxz['th'] - dsxz0['th'].values
+    dsxz['rhoprime']=dsxz['rho'] - dsxz0['rho'].values
+
+    # ds['dzdx_surf'] = ds['zcr'][0,:,:]
+    # ds['dzdx_surf'].values = np.gradient(ds['zcr'][0,:,:].values, cfg['dx'], axis=1)
+
+    ## Brunt-Vaisala frequency N and temperature t
+    # N  = (g/th * np.gradient(th, vres))**(1/2)
+    dsxz['N'] = (cfg['constants']['gravity0']/dsxz['th'] * np.gradient(dsxz['th'], cfg['dz'], axis=0))**(1/2)
+    dsxz['t'] = dsxz['th']*(dsxz['p']/cfg['constants']['p0'])**cfg['constants']['Rd_cpd']
+
+    ## YZ
     
-    ## INVERSE FFT ##
-    data_filtered = xrft.ifft(da_fft_low)
+    ## XY
+    if t is None:
+        dsxy  = xr.open_dataset(os.path.join(fpath, f"slices_z.nc"), decode_times=False, chunks={}).isel(z=slices['z'])
+    else:
+        dsxy  = xr.open_dataset(os.path.join(fpath, f"slices_z.nc"), chunks={}).isel(time=t, z=slices['z'])
+    dsxy0 = xr.open_dataset(os.path.join(fpath, f"slices_z.nc"), chunks={}).isel(time=0, z=slices['z'])
+    try:
+        dsxy  = dsxy.rename({"density":"rho", "theta_total":"th", "uvelx": "u", "uvely": "v", "uvelz": "w"})
+    except:
+        dsxy  = dsxy.rename({"density":"rho", "theta_total":"th"})
+    dsxy0 = dsxy0.rename({"density":"rho", "theta_total":"th"})
 
-    return data_filtered.real
+    dsxy['p'] =  cfg['constants']['p0'] * dsxy["exner_total"] ** (cfg['constants']['cpd'] / cfg['constants']['Rd']) # (cp / Rd)
+    dsxy0['p'] =  cfg['constants']['p0'] * dsxy0["exner_total"] ** (cfg['constants']['cpd'] / cfg['constants']['Rd']) # (cp / Rd)
+    dsxy['pprime']   = dsxy['p'] - dsxy0['p'].values
+    dsxy['thprime']  = dsxy['th'] - dsxy0['th'].values
+    dsxy['rhoprime'] = dsxy['rho'] - dsxy0['rho'].values
+    dsxy['t']  = dsxy['th']*(dsxy['p']/cfg['constants']['p0'])**cfg['constants']['Rd_cpd']
+
+    return dsxz, dsxy, cfg
 
 
-def gaussian_filter_fft(arr, wavelength_x, wavelength_y, res_x, res_y):
-    """
-    Apply a Gaussian filter to a 2D array using FFT with different resolutions and cutoff wavelengths for each dimension.
+def preprocess_pmap_3D(sim, folder, t=4):
+    with open(os.path.join(folder,sim, "config.yml"), 'r') as stream:
+        cfg = yaml.safe_load(stream)
+        ## TODO: check dx
+        cfg['dx'] = (cfg['xmax'] - cfg['xmin']) / cfg['nx']
+        cfg['dy'] = (cfg['ymax'] - cfg['ymin']) / cfg['ny']
+        cfg['dz'] = (cfg['zmax'] - cfg['zmin']) / cfg['nz']
+        
+        cfg['constants']['R'] = cfg['constants']['Ravo']*cfg['constants']['Rbol']
+        cfg['constants']['Rd'] = 1000 * cfg['constants']['R'] / cfg['constants']['Rmd']
+        cfg['constants']['cpd'] = cfg['constants']['gamma'] / (cfg['constants']['gamma'] - 1.0) * cfg['constants']['Rd']
+        cfg['constants']['Rd_cpd'] = cfg['constants']['Rd'] / cfg['constants']['cpd']
 
-    Parameters:
-    arr (numpy.ndarray): 2D numpy array to be smoothed.
-    wavelength_x (float): Cutoff wavelength in the x dimension.
-    wavelength_y (float): Cutoff wavelength in the y dimension.
-    res_x (float): Resolution in the x dimension.
-    res_y (float): Resolution in the y dimension.
+        # cfg['ambient_fields']['velocity_x']
+        # cfg['define_orography']['args']
+        # cfg['constants']['fcoriolis0']
+        # cfg['constants']['angle0']
 
-    Returns:
-    numpy.ndarray: Smoothed 2D array.
-    """
-    # Get the dimensions of the input array
-    nx, ny = arr.shape
+    ds  = xr.open_dataset(os.path.join(folder,sim, f"data_{t}.nc"))
+    ds0 = xr.open_dataset(os.path.join(folder,sim, f"data_0.nc"))
+    ds['pprime']=ds['pressure'] - ds0['pressure'].values
+    # ds['pprime']=ds['pressure'] - cfg['constants']['p0']
+    ds['thprime']=ds['theta_total'] - ds0['theta_total'].values
+    ds['rhoprime']=ds['density'] - ds0['density'].values
 
-    # Create the grid in the frequency domain
-    kx = np.fft.fftfreq(nx, d=res_x)[:, None]
-    ky = np.fft.fftfreq(ny, d=res_y)[None, :]
+    # ds['dzdx_surf'] = ds['zcr'][0,:,:]
+    # ds['dzdx_surf'].values = np.gradient(ds['zcr'][0,:,:].values, cfg['dx'], axis=1)
+
+    ## Brunt-Vaisala N
+    # N  = (g/th * np.gradient(th, vres))**(1/2)
+    ds['N'] = (cfg['constants']['gravity0']/ds['theta_total'] * np.gradient(ds['theta_total'], cfg['dz'], axis=1))**(1/2)
     
-    # Calculate the Gaussian filter in the frequency domain using wavelengths
-    sigma_x = wavelength_x / (2.0 * np.pi)
-    sigma_y = wavelength_y / (2.0 * np.pi)
-    gaussian = np.exp(-0.5 * ((kx**2) * (sigma_x**2) + (ky**2) * (sigma_y**2)))
-    
-    # Perform FFT of the input array
-    arr_fft = np.fft.fft2(arr)
-    
-    # Apply the Gaussian filter in the frequency domain
-    arr_fft_filtered = arr_fft * gaussian
-    
-    # Perform inverse FFT to get the smoothed array
-    arr_smoothed = np.fft.ifft2(arr_fft_filtered).real
-    
-    return arr_smoothed
+    ## Temperature
+    ds['t_total'] = ds['theta_total']*(ds['pressure']/cfg['constants']['p0'])**cfg['constants']['Rd_cpd']
+
+    return ds, cfg
 
 
-def preprocess_eulag_output(fpath):
+def preprocess_eulag_tapes(fpath, load_ds=False):
     """Process EULAG output"""
-    env_path   = os.path.join(fpath, "env.nc")
-    tapes_path = os.path.join(fpath, "tapes.nc")
     grid_path  = os.path.join(fpath, "grd.nc") # --> ds
-    ds_full = xr.open_dataset(tapes_path)
-    ds_env  = xr.open_dataset(env_path)
-    ds      = xr.open_dataset(grid_path)
-    ds      = ds.assign_coords({'xcr':ds['xcr']/1000, 'ycr':ds['ycr']/1000, 'zcr':ds['zcr']/1000})
+    tapes_path = os.path.join(fpath, "tapes.nc")
+    if load_ds:
+        ds = xr.load_dataset(grid_path)
+        ds_full = xr.load_dataset(tapes_path)
+    else:
+        ds = xr.open_dataset(grid_path)
+        ds_full = xr.open_dataset(tapes_path)
+    if ds.ibcx == 1:
+        # Shift to centered domain
+        ds['xcr'] = ds['xcr'] - np.max(ds['xcr']/2)
+        ds['ycr'] = ds['ycr'] - np.max(ds['ycr']/2)
+    ds = ds.assign_coords({'xcr':ds['xcr'], 'ycr':ds['ycr'], 'zcr':ds_full['ELEVATION']})
     
-    # ---- Sim parameters -------------- # 
+    ## Sim parameters
     ds.attrs['bv'] = ds.attrs['bv'].round(3)
-    ds.attrs['nx'] = np.shape(ds_full['w'])[3]
-    ds.attrs['ny'] = np.shape(ds_full['w'])[2]
-    ds.attrs['nz'] = np.shape(ds_full['w'])[1]
-    
     ds.attrs['cp']=3.5*ds.rg # Earth
     ds.attrs['cap']=ds.rg/ds.cp
-    ds.attrs['pref00']=101325.
+    if "itopo" not in ds.attrs:
+        ds.attrs['itopo'] = 1
+    
+    ds_full = ds_full.rename({"p":"pprime", "th":"thprime"})
+    ds = ds.merge(ds_full)
         
+    return ds
+
+
+def preprocess_eulag_tstep(fpath, t, slices={"x": 0, "y": 0, "z": [0]}):
+    """Process EULAG output"""
+    slices = sanitize_slice_request(fpath, slices)
+    grid_path  = os.path.join(fpath, "grd.nc") # --> ds
+    ds = xr.open_dataset(grid_path)
+    if ds.ibcx == 1:
+        # Shift to centered domain
+        ds['xcr'] = ds['xcr'] - np.max(ds['xcr']/2)
+        ds['ycr'] = ds['ycr'] - np.max(ds['ycr']/2)
+    ds = ds.assign_coords({'xcr':ds['xcr']/1000, 'ycr':ds['ycr']/1000, 'zcr':ds['zcr']/1000})
+    
+    ## Sim parameters
+    ds.attrs['bv'] = ds.attrs['bv'].round(3)
+    ds.attrs['cp']=3.5*ds.rg # Earth
+    ds.attrs['cap']=ds.rg/ds.cp
+    if "itopo" not in ds.attrs:
+        ds.attrs['itopo'] = 1
+
     """Slice outputs"""
     # dsxy['zcr'] = dsxy['zcr'] / 1000
     xzslices = sorted(glob.glob(os.path.join(fpath, "xzslc_*")))
     yzslices = sorted(glob.glob(os.path.join(fpath, "yzslc_*")))
     xyslices = sorted(glob.glob(os.path.join(fpath, "xyslc_*")))
-    ds_xzslices = []
-    ds_yzslices = []
     ds_xyslices = []
-    for slc in xzslices:
-        ds_slc = xr.open_dataset(slc)
-        ds_slc.attrs['j'] = int(slc.split("/")[-1][-8:-3])
-        ds_slc.attrs['ypos'] = (ds_slc.j - ds.ny/2) * ds.dy00/1000
-        # ds.attrs['pref00'] = ds_slc['pr0'].max()
+
+    # XY-slices
+    for slc_ind in slices['z']:
+        slc = xyslices[slc_ind]
+        ds_slc = xr.open_dataset(slc, chunks={}).isel(t=t)
+        ds_slc['zcr'] = ds_slc['zcr'] / 1000 #zkm
+        ds_slc.attrs['k'] = int(slc.split("/")[-1][-8:-3])
+        ds_slc.attrs['zpos'] = ds_slc.k * ds.dz00/1000
+        ds_slc = ds_slc.assign_coords(xcr = ds['xcr'])
+        ds_slc = ds_slc.assign_coords(ycr = ds['ycr'])
+        ds_slc = ds_slc.rename({"p":"pprime", "th":"thprime"})
+        ds_xyslices.append(ds_slc)
         
-        # ds_slc = ds_slc.assign_coords({ds_slc.zcr:ds_slc.z})
-        ds_xzslices.append(ds_slc)
-    for slc in yzslices:
+    # XZ-slice
+    slc = xzslices[slices['y']]
+    ds_slc = xr.open_dataset(slc, chunks={}).isel(t=t)
+    ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+    ds_slc.attrs['j'] = int(slc.split("/")[-1][-8:-3])
+    ds_slc.attrs['ypos'] = (ds_slc.j - ds.ny/2) * ds.dy00/1000
+    # ds.attrs['pref00'] = ds_slc['pr0'].max()
+    
+    # time = ds_slc.t * ds.nlid * ds.dt00/3600
+    ds_slc = ds_slc.assign_coords({'xcr': ds['xcr'], 'zcr':ds_slc['zcr']})
+    # ds_slc = ds_slc.assign_coords({'time': time, 'xcr': ds['xcr'], 'zcr':ds_slc['zcr']})
+
+    ds_slc = ds_slc.assign_attrs(ds.attrs)
+    ds_slc["theta_total"] = ds_slc["the"] + ds_slc["th"]
+    ds_slc["pressure"] = ds_slc["ppe"] + ds_slc["p"]
+    ds_slc = ds_slc.rename({"p":"pprime", "pressure":"p", "th":"thprime", "theta_total":"th"})
+    dsxz = ds_slc
+
+    # YZ-slice
+    slc = yzslices[slices['x']]
+    ds_slc = xr.open_dataset(slc, chunks={}).isel(t=t)
+    ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+    ds_slc.attrs['i'] = int(slc.split("/")[-1][-8:-3])
+    if ds.ibcx == 0:
+        ds_slc.attrs['xpos'] = (ds_slc.i - ds.nx/2)  * ds.dx00/1000
+    else:
+        ds_slc.attrs['xpos'] = ds_slc.i  * ds.dx00/1000
+
+    ds_slc = ds_slc.assign_coords({'ycr': ds['ycr'], 'zcr':ds_slc['zcr']})
+    ds_slc = ds_slc.rename({"p":"pprime", "th":"thprime"})
+    dsyz = ds_slc
+    
+    return ds, dsxz, dsyz, ds_xyslices
+
+
+def preprocess_eulag_xzyz(fpath, slices={"x": 0, "y": 0, "z": [0]}):
+    """Process EULAG output"""
+    slices = sanitize_slice_request(fpath, slices)
+    grid_path  = os.path.join(fpath, "grd.nc") # --> ds
+    ds = xr.open_dataset(grid_path)
+    if ds.ibcx == 1:
+        # Shift to centered domain
+        ds['xcr'] = ds['xcr'] - np.max(ds['xcr']/2)
+        ds['ycr'] = ds['ycr'] - np.max(ds['ycr']/2)
+    ds = ds.assign_coords({'xcr':ds['xcr']/1000, 'ycr':ds['ycr']/1000, 'zcr':ds['zcr']/1000})
+    
+    ## Sim parameters
+    ds.attrs['bv'] = ds.attrs['bv'].round(3)
+    ds.attrs['cp']=3.5*ds.rg # Earth
+    ds.attrs['cap']=ds.rg/ds.cp
+    if "itopo" not in ds.attrs:
+        ds.attrs['itopo'] = 1
+
+    """Slice outputs"""
+    xzslices = sorted(glob.glob(os.path.join(fpath, "xzslc_*")))
+    yzslices = sorted(glob.glob(os.path.join(fpath, "yzslc_*")))
+
+    # XZ-slice
+    slc = xzslices[slices['y']]
+    ds_slc = xr.open_dataset(slc)
+    ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+    ds_slc.attrs['j'] = int(slc.split("/")[-1][-8:-3])
+    ds_slc.attrs['ypos'] = (ds_slc.j - ds.ny/2) * ds.dy00/1000
+    # ds.attrs['pref00'] = ds_slc['pr0'].max()
+    
+    # ds_slc = ds_slc.assign_coords({ds_slc.zcr:ds_slc.z})
+    time = ds_slc.t * ds.nlid * ds.dt00/3600
+    # ds_slc['time'] = ds_slc['time'].expand_dims({'z':ds_lid.z}, axis=1)
+
+    ds_slc = ds_slc.assign_coords({'time': time, 'xcr': ds['xcr'], 'zcr':ds_slc['zcr']})
+    ds_slc = ds_slc.assign_attrs(ds.attrs)
+    ds_slc = ds_slc.rename({"p":"pprime", "th":"thprime"})
+    dsxz = ds_slc
+    
+    # YZ-slice
+    slc = yzslices[slices['x']]
+    ds_slc = xr.open_dataset(slc)
+    ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+    ds_slc.attrs['i'] = int(slc.split("/")[-1][-8:-3])
+    if ds.ibcx == 0:
+        ds_slc.attrs['xpos'] = (ds_slc.i - ds.nx/2)  * ds.dx00/1000
+    else:
+        ds_slc.attrs['xpos'] = ds_slc.i  * ds.dx00/1000
+
+    ds_slc = ds_slc.assign_coords({'time': time, 'ycr': ds['ycr'], 'zcr':ds_slc['zcr']})
+    ds_slc = ds_slc.rename({"p":"pprime", "th":"thprime"})
+    dsyz = ds_slc
+
+    return dsxz, dsyz
+
+
+def preprocess_eulag_xy_merged(fpath, slices={"x": 0, "y": 0, "z": [0]}, t=None):
+    slices = sanitize_slice_request(fpath, slices)
+    grid_path = os.path.join(fpath, "grd.nc")
+    ds = xr.open_dataset(grid_path)
+    if ds.ibcx == 1:
+        ds["xcr"] = ds["xcr"] - np.max(ds["xcr"] / 2)
+        ds["ycr"] = ds["ycr"] - np.max(ds["ycr"] / 2)
+    ds = ds.assign_coords({"xcr": ds["xcr"] / 1000, "ycr": ds["ycr"] / 1000, "zcr": ds["zcr"] / 1000})
+
+    xyslices = sorted(glob.glob(os.path.join(fpath, "xyslc_*")))
+    merged = []
+    for slc_ind in slices["z"]:
+        ds_slc = xr.open_dataset(xyslices[slc_ind], chunks={})
+        if t is not None:
+            ds_slc = ds_slc.isel(t=t)
+        ds_slc["zcr"] = ds_slc["zcr"] / 1000
+        ds_slc = ds_slc.assign_coords({"xcr": ds["xcr"], "ycr": ds["ycr"]})
+        ds_slc = ds_slc.rename({"p": "pprime", "th": "thprime"})
+        ds_slc = ds_slc.expand_dims({"zslc": [int(slc_ind)]})
+        ds_slc = ds_slc.assign_coords({"k": ("zslc", [int(slc_ind)]), "zpos": ("zslc", [int(slc_ind) * ds.dz00 / 1000])})
+        merged.append(ds_slc)
+    return xr.concat(merged, dim="zslc")
+
+
+def preprocess_eulag_output(fpath, slices={"x": 0, "y": 0, "z": [0]}, load_ds=False):
+    """Process EULAG output"""
+    slices = sanitize_slice_request(fpath, slices)
+    grid_path  = os.path.join(fpath, "grd.nc") # --> ds
+    if load_ds:
+        ds = xr.load_dataset(grid_path)
+    else:
+        ds = xr.open_dataset(grid_path)
+    if ds.ibcx == 1:
+        # Shift to centered domain
+        ds['xcr'] = ds['xcr'] - np.max(ds['xcr']/2)
+        ds['ycr'] = ds['ycr'] - np.max(ds['ycr']/2)
+    ds = ds.assign_coords({'xcr':ds['xcr']/1000, 'ycr':ds['ycr']/1000, 'zcr':ds['zcr']/1000})
+    
+    ## Sim parameters
+    ds.attrs['bv'] = ds.attrs['bv'].round(3)
+    ds.attrs['cp']=3.5*ds.rg # Earth
+    ds.attrs['cap']=ds.rg/ds.cp
+    if "itopo" not in ds.attrs:
+        ds.attrs['itopo'] = 1
+
+    """Slice outputs"""
+    # dsxy['zcr'] = dsxy['zcr'] / 1000
+    xzslices = sorted(glob.glob(os.path.join(fpath, "xzslc_*")))
+    yzslices = sorted(glob.glob(os.path.join(fpath, "yzslc_*")))
+    xyslices = sorted(glob.glob(os.path.join(fpath, "xyslc_*")))
+    ds_xyslices = []
+
+    # XZ-slice
+    slc = xzslices[slices['y']]
+    if load_ds:
+        ds_slc = xr.load_dataset(slc)
+    else:
         ds_slc = xr.open_dataset(slc)
-        ds_slc.attrs['i'] = int(slc.split("/")[-1][-8:-3])
-        if ds.ibcx == 0:
-            ds_slc.attrs['xpos'] = (ds_slc.i - ds.nx/2)  * ds.dx00/1000
+    ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+    ds_slc.attrs['j'] = int(slc.split("/")[-1][-8:-3])
+    ds_slc.attrs['ypos'] = (ds_slc.j - ds.ny/2) * ds.dy00/1000
+    # ds.attrs['pref00'] = ds_slc['pr0'].max()
+    
+    # ds_slc = ds_slc.assign_coords({ds_slc.zcr:ds_slc.z})
+    time = ds_slc.t * ds.nlid * ds.dt00/3600
+    # ds_slc['time'] = ds_slc['time'].expand_dims({'z':ds_lid.z}, axis=1)
+
+    ds_slc = ds_slc.assign_coords({'time': time, 'xcr': ds['xcr'], 'zcr':ds_slc['zcr']})
+    ds_slc = ds_slc.assign_attrs(ds.attrs)
+    dsxz = ds_slc
+
+    # YZ-slice
+    slc = yzslices[slices['x']]
+    if load_ds:
+        ds_slc = xr.load_dataset(slc)
+    else:
+        ds_slc = xr.open_dataset(slc)
+    ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
+    ds_slc.attrs['i'] = int(slc.split("/")[-1][-8:-3])
+    if ds.ibcx == 0:
+        ds_slc.attrs['xpos'] = (ds_slc.i - ds.nx/2)  * ds.dx00/1000
+    else:
+        ds_slc.attrs['xpos'] = ds_slc.i  * ds.dx00/1000
+
+    ds_slc = ds_slc.assign_coords({'time': time, 'ycr': ds['ycr'], 'zcr':ds_slc['zcr']})
+    dsyz = ds_slc
+
+    # XY-slices
+    for slc_ind in slices['z']:
+        slc = xyslices[slc_ind]
+        if load_ds:
+            ds_slc = xr.load_dataset(slc)
         else:
-            ds_slc.attrs['xpos'] = ds_slc.i  * ds.dx00/1000
-        ds_yzslices.append(ds_slc)
-    for slc in xyslices:
-        ds_slc = xr.open_dataset(slc)
+            ds_slc = xr.open_dataset(slc)
         ds_slc['zcr'] = ds_slc['zcr'] / 1000 #km
         ds_slc.attrs['k'] = int(slc.split("/")[-1][-8:-3])
         ds_slc.attrs['zpos'] = ds_slc.k * ds.dz00/1000
+        ds_slc = ds_slc.assign_coords(xcr = ds['xcr'])
+        ds_slc = ds_slc.assign_coords(ycr = ds['ycr'])
         ds_xyslices.append(ds_slc)
     
     """Lidar outputs with high temporal resolution"""
-    lid_colors = ["purple", "forestgreen"]
-    lidars = sorted(glob.glob(os.path.join(fpath, "lid_*")))
-    ds_lidars = []
-    for i, lid_file in enumerate(lidars):
-        ds_lid = xr.open_dataset(lid_file)
-        ds_lid['time'] = ds_lid.t * ds.nlid * ds.dt00/3600
-        ds_lid['time'] = ds_lid['time'].expand_dims({'z':ds_lid.z}, axis=1)
-        ds_lid['zcr'] = ds_lid['zcr']/1000
+    # lid_colors = ["purple", "forestgreen"]
+    # lidars = sorted(glob.glob(os.path.join(fpath, "lid_*")))
+    # ds_lidars = []
+    # for i, lid_file in enumerate(lidars):
+    #     if load_ds:
+    #         ds_lid = xr.load_dataset(lid_file)
+    #     else:
+    #         ds_lid = xr.open_dataset(lid_file)
+    #     ds_lid['time'] = ds_lid.t * ds.nlid * ds.dt00/3600
+    #     ds_lid['time'] = ds_lid['time'].expand_dims({'z':ds_lid.z}, axis=1)
+    #     ds_lid['zcr'] = ds_lid['zcr']/1000
         
-        loc_str = lid_file.split("/")[-1][:-3]
-        ds_lid.attrs['i'] = int(str(loc_str)[4:9])
-        ds_lid.attrs['j'] = int(str(loc_str)[-5:])
-        if ds.ibcx == 0:
-            ds_lid.attrs['xpos'] = (ds_lid.i - ds.nx/2)  * ds.dx00/1000
-        else:
-            ds_lid.attrs['xpos'] = ds_lid.i * ds.dx00/1000
-        ds_lid.attrs['ypos'] = (ds_lid.j - ds.ny/2) * ds.dy00/1000
-        ds_lid.attrs['color'] = lid_colors[i]
-        ds_lidars.append(ds_lid)
-        
-    return ds, ds_env, ds_xzslices, ds_yzslices, ds_xyslices, ds_lidars, ds_full
+    #     loc_str = lid_file.split("/")[-1][:-3]
+    #     ds_lid.attrs['i'] = int(str(loc_str)[4:9])
+    #     ds_lid.attrs['j'] = int(str(loc_str)[-5:])
+    #     if ds.ibcx == 0:
+    #         ds_lid.attrs['xpos'] = (ds_lid.i - ds.nx/2)  * ds.dx00/1000
+    #     else:
+    #         ds_lid.attrs['xpos'] = ds_lid.i * ds.dx00/1000
+    #     ds_lid.attrs['ypos'] = (ds_lid.j - ds.ny/2) * ds.dy00/1000
+    #     ds_lid.attrs['color'] = lid_colors[i]
+    #     ds_lidars.append(ds_lid)
+
+    # return ds, dsxz, dsyz, ds_xyslices, ds_lidars
+    return ds, dsxz, dsyz, ds_xyslices
+
+
+def preprocess_model_xzyz(fpath, slices={"x": 0, "y": 0, "z": [0]}):
+    model = detect_model_output(fpath)
+    slices = sanitize_slice_request(fpath, slices)
+    if model == "pmap":
+        cfg, dsxz, dsyz = preprocess_pmap_xzyz(fpath, slices=slices)
+        return model, cfg, dsxz, dsyz
+    grid_path = os.path.join(fpath, "grd.nc")
+    ds = xr.open_dataset(grid_path)
+    if ds.ibcx == 1:
+        ds["xcr"] = ds["xcr"] - np.max(ds["xcr"] / 2)
+        ds["ycr"] = ds["ycr"] - np.max(ds["ycr"] / 2)
+    ds = ds.assign_coords({"xcr": ds["xcr"] / 1000, "ycr": ds["ycr"] / 1000, "zcr": ds["zcr"] / 1000})
+    ds.attrs["bv"] = ds.attrs["bv"].round(3)
+    ds.attrs["cp"] = 3.5 * ds.rg
+    ds.attrs["cap"] = ds.rg / ds.cp
+    if "itopo" not in ds.attrs:
+        ds.attrs["itopo"] = 1
+    dsxz, dsyz = preprocess_eulag_xzyz(fpath, slices=slices)
+    return model, ds, dsxz, dsyz
+
+
+def preprocess_model_tstep(fpath, t, slices={"x": 0, "y": 0, "z": [0]}):
+    model = detect_model_output(fpath)
+    slices = sanitize_slice_request(fpath, slices)
+    if model == "pmap":
+        cfg, dsxz, dsyz, ds_xyslices = preprocess_pmap_tstep(fpath, t=t, slices=slices)
+        return model, cfg, dsxz, dsyz, ds_xyslices
+    ds, dsxz, dsyz, ds_xyslices = preprocess_eulag_tstep(fpath, t=t, slices=slices)
+    return model, ds, dsxz, dsyz, ds_xyslices
 
 
 def timelab_format_func(value, tick_number):
@@ -246,11 +820,10 @@ def major_formatter_lat(x, pos):
     return "%.f°S" % abs(x)
 
 
-def create_animation(image_folder, animation_name):
+def create_animation(image_folder, animation_name, fps=10):
     """Create animation (mp4) from pngs"""
 
     filenames        = sorted(os.listdir(image_folder))
-    fps              = 10
     macro_block_size = 16
 
     # Increase the probesize to give FFmpeg more data to estimate the rate
@@ -319,20 +892,28 @@ def get_colormap_bins_and_labels(max_level=64,linear=False):
 
     """
     # - Logarithmic - #
-    CLEV_64 = [-64,-32,-16,-8,-4,-2,-1,1,2,4,8,16,32,64]
-    CLEV_64_LABELS = [-32,-8,-2,2,8,32]
+    CLEV_256 = [-512,-256,-128,-64,-32,-16,-8,-4,4,8,16,32,64,128,256,512]
+    CLEV_256_LABELS = [-512,-128,-32,-8,8,32,128,512]
+    
+    CLEV_64 = [-64,-32,-16,-8,-4,-2,-1,-0.5,-0.25,0.25,0.5,1,2,4,8,16,32,64]
+    CLEV_64_LABELS = [-64,-16,-4,-1,1,4,16,64]
 
     CLEV_32 = [-32,-16,-8,-4,-2,-1,-0.5,0.5,1,2,4,8,16,32]
     CLEV_32_LABELS = [-16,-4,-1,1,4,16]
+    ##  CLEV_32 = [-32,-16,-8,-4,-2,-1,-0.5,-0.25,-0.125,0.125,0.25,0.5,1,2,4,8,16,32]
+    # CLEV_32 = [-32,-16,-8,-4,-2,-1,-0.5,-0.25,0.25,0.5,1,2,4,8,16,32]
+    # CLEV_32_LABELS = [-32,-8,-2,-0.5,0.5,2,8,32]
 
-    CLEV_16 = [-16,-8,-4,-2,-1,-0.5,-0.25,-0.125,0.125,0.25,0.5,1,2,4,8,16]
-    CLEV_16_LABELS = [-8,-2,-0.5,-0.125,0.125,0.5,2,8]
+    CLEV_16 = [-16,-8,-4,-2,-1,-0.5,-0.25,-0.125,-0.0625,0.0625,0.125,0.25,0.5,1,2,4,8,16]
+    CLEV_16_LABELS = [-16,-4,-1,-0.25,0.25,1,4,16]
+    #CLEV_16 = [-16,-8,-4,-2,-1,-0.5,0.5,1,2,4,8,16]
+    #CLEV_16_LABELS = [-16,-4,-1,1,4,16]
 
     CLEV_8 = [-8,-4,-2,-1,-0.5,-0.25,-0.125,-0.0625,0.0625,0.125,0.25,0.5,1,2,4,8]
     CLEV_8_LABELS = [-4,-1,-0.25,-0.0625,0.0625,0.25,1,4]
 
     CLEV_2 = [-2,-1,-0.5,-0.25,-0.125,-0.0625,-0.03125,-0.015625,0.015625,0.03125,0.0625,0.125,0.25,0.5,1,2]
-    CLEV_2_LABELS = [-1,-0.25,-0.0625,-0.015625,0.015625,0.0625,0.25,1]
+    CLEV_2_LABELS = [-1,-0.25,-0.0625,0.0625,0.25,1]
 
     CLEV_08 = np.array(CLEV_8) / 10
     CLEV_08_LABELS = np.array(CLEV_8_LABELS) / 10
@@ -376,6 +957,9 @@ def get_colormap_bins_and_labels(max_level=64,linear=False):
         if max_level==64:
             CLEV = CLEV_64
             CLEV_LABELS = CLEV_64_LABELS
+        elif max_level==256:
+            CLEV = CLEV_256
+            CLEV_LABELS = CLEV_256_LABELS
         elif max_level==32:
             CLEV = CLEV_32
             CLEV_LABELS = CLEV_32_LABELS

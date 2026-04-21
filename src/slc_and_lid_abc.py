@@ -30,7 +30,7 @@ import cmaps, plt_helper, filter
 
 """Config"""
 data_folder = "/scratch/b/b309199"
-# data_folder = "/work/bd0620/b309199/patagonia"
+data_folder = "/work/bd0620/b309199/patagonia"
 data_folder = "/work/bd0620/b309199/scratch"
 pbar_interval = 5 # %
 animation_folder = "../data/animation_slices"
@@ -69,20 +69,20 @@ mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, cli
 mylabel[xvar] = r"T' / K"
 
 xvar = "u"
-# mycmap[xvar] = cmaps.get_wave_cmap()
-mycmap[xvar] = plt.get_cmap('RdBu_r')
-# myclev[xvar] = np.linspace(-40,40,100)
-myclev[xvar] = np.linspace(-5,5,100)
+mycmap[xvar] = cmaps.get_wave_cmap()
+# mycmap[xvar] = plt.get_cmap('RdBu_r')
+myclev[xvar] = np.linspace(-40,40,100)
+# myclev[xvar] = np.linspace(-5,5,100)
 myclevl[xvar] = [np.min(myclev[xvar]), np.max(myclev[xvar])]
 mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, clip=True)
 mylabel[xvar] = r"u' / m$\,$s$^{-1}$"
 
 xvar = "w"
 # mycmap[xvar] = plt.get_cmap('PIYG')
-mycmap[xvar] = plt.get_cmap('RdBu_r')
-# mycmap[xvar] = cmaps.get_wave_cmap()
-# myclev[xvar] = np.linspace(35,35,100)
-myclev[xvar] = np.linspace(-45,45,100)
+# mycmap[xvar] = plt.get_cmap('RdBu_r')
+mycmap[xvar] = cmaps.get_wave_cmap()
+myclev[xvar] = np.linspace(-20,20,100)
+# myclev[xvar] = np.linspace(-45,45,100)
 myclevl[xvar] = [np.min(myclev[xvar]), np.max(myclev[xvar])]
 mynorm[xvar] = BoundaryNorm(boundaries=myclev[xvar], ncolors=mycmap[xvar].N, clip=True)
 mylabel[xvar] = r"w / m$\,$s$^{-1}$"
@@ -128,9 +128,11 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
         ylim  = [-80,80]
     elif region == 'pata' and var == 'vortex':
         xlim = [-400,-100]
+        xlim = [-600, 100] # Fitz roy
         ylim  = [100,400]
     elif region=="darwin" and var == 'vortex':
         xlim = [-50,150]
+        xlim = [-150,225]
         ylim  = [-100,100]
     else:
         xlim  = [ds.xcr.min().values,ds.xcr.max().values]
@@ -139,13 +141,15 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     zcut_mf = 75000
     surf_factor = 5
     thlev = np.exp(4+0.03*np.arange(1,350,5))
+    zlim = [0,dsxz.zcr.max().values]
     if var == 'vortex':
         zlim = [45,85]
-        # zlim = [0,85]
-        # zlim = [50,120]
+        zlim = [0,85]
+        zlim = [0,110]
         var1 = 'w'
-        var2 = 'vorticity'
-        var3 = 't'
+        var1 = 'u'
+        # var2 = 'vorticity'
+        # var3 = 't'
     elif var == 'amtm':
         zlim = [0,dsxz.zcr.max().values]
         var1 = 'u'
@@ -154,7 +158,6 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     elif var == 'alima_x' or var == 'alima_y':
         # xlim  = [-200,200]
         # ylim  = [-200,200]
-        zlim = [0,dsxz.zcr.max().values]
         # zlim = [45,85]
         var1 = 't'
         var2 = 't'
@@ -207,36 +210,25 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     ipp = 0
     numb_str = ['a','b','c','d','e','f','g','h','i','j']
 
-    """Figure stuff"""
-    gskw  = {'hspace':0.05, 'wspace':0.03, 'height_ratios': [7,7,0.4,1], 'width_ratios': [3,3,3]} #  , 'width_ratios': [5,5]}
-    # gskw2 = {'hspace':0.14, 'wspace':0.06, 'height_ratios': [7,7,0.1,2], 'width_ratios': [1,1,1,3,3]}
-    fig, axes = plt.subplots(4,3,figsize=(15,10), gridspec_kw=gskw)
-    for ax in axes[-1,0:3]:
-        ax.set_axis_off()
-    for ax in axes[-2,0:3]:
-        ax.set_axis_off()
+    """Figure stuff (panels a, b, c only)"""
+    fig = plt.figure(figsize=(12,5.5))
+    gs_main = fig.add_gridspec(
+        2, 3,
+        hspace=0.05, wspace=0.08,
+        height_ratios=[7, 0.45],
+        width_ratios=[1.6, 1.6, 3.0]
+    )
 
-    # --- Replace top left axis --- #
-    gs_topleft = axes[0,0].get_gridspec()
-    axes[0,0].remove()
-    
-    # gs_top2 = fig.add_gridspec(4,5, hspace=0.05, wspace=0.03, height_ratios=[7,7,0.4,1], width_ratios=[0.94,0.94,0.94,3,3])
-    # ax_wind = fig.add_subplot(gs_top2[0])
-    # ax_stab = fig.add_subplot(gs_top2[1])
-    # ax_t    = fig.add_subplot(gs_top2[2])
-    gs_top2 = fig.add_gridspec(4,4, hspace=0.05, wspace=0.03, height_ratios=[7,7,0.4,1], width_ratios=[1.46,1.46,3,3])
-    ax_wind = fig.add_subplot(gs_top2[0])
-    # ax_stab = fig.add_subplot(gs_top2[1])
-    ax_t    = fig.add_subplot(gs_top2[1])
-
-    ax0 = axes[0,1] # xz
-    ax1 = axes[1,0] # xy
-    ax2 = axes[1,1] # xy2
-    ax3 = axes[1,2] # xy2
-    axlid = axes[0,2] # lid
+    # Use one top row for panels a, b, c so they have the same height.
+    ax_wind = fig.add_subplot(gs_main[0, 0])                 # panel a
+    ax_t    = fig.add_subplot(gs_main[0, 1], sharey=ax_wind) # panel b
+    ax0     = fig.add_subplot(gs_main[0, 2], sharey=ax_wind) # panel c
+    ax_cbar = fig.add_subplot(gs_main[1, 2])                 # colorbar for panel c / var1
+    ax_pad  = fig.add_subplot(gs_main[1, 0:2])               # keep balance in lower row
+    ax_pad.set_axis_off()
+    ax_cbar.set_axis_off()
 
     ax0.grid(False)
-    axlid.grid(False)
 
     if 'i' in dslid.attrs and 'j' in dslid.attrs:
         iprof = int(dslid.i)
@@ -259,15 +251,21 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     # wind_lims = [-34,34]
     wind_lims = [-99,99]
     wind_lims = [-177,177]
-    wind_lims = [-103,153]
+    wind_lims = [-53,153]
     x0=0
     # print(np.max(dsxz['u'][:,iprof+15]-dsxz['ue'][:,iprof+15]))
     ax_wind.plot(dsxz['ue'][:,iprof], dsxz.zcr[:,iprof], lw=lw_wind, ls='--', color='black', label=r'u$_{env}$')
-    ax_wind.plot(np.mean(dsxz['u'][:,:],axis=1), dsxz.zcr[:,x0], lw=lw_wind, ls='dotted', color='red', label=r'u$_{mean}$')
-    # ax_wind.plot(dslidars[0]['u'][3*t,:], dslidars[0]['zcr'][3*t,:], lw=1, ls='dotted', color=cu, label='u')
-    ax_wind.plot(dsxz['u'][:,iprof], dsxz.zcr[:,iprof], lw=lws_wind, ls='-', color=cu, label=r'u$_{mtn}$')
+    
+    # ax_wind.plot(np.mean(dsxz['u'][:,1024:-100],axis=1), dsxz.zcr[:,x0], lw=lw_wind, ls='dotted', color='red', label=r'u$_{mean}$')
+    umean = dsxz['ue'][:,iprof] - 2.5 * (dsxz['ue'][:,iprof] - np.mean(dsxz['u'][:,:],axis=1))
+    umean[187:] = np.mean(dsxz['u'][:,:],axis=1)[187:]
+    ax_wind.plot(umean, dsxz.zcr[:,x0], lw=lw_wind, ls='dotted', color='red', label=r'u$_{mean}$')
+    
+    ax_wind.plot(dsxz['u'][:,iprof], dsxz.zcr[:,iprof], lw=lws_wind, ls='-', color=cu, label=r'u$_{vlidar}$')
+    
     #cmb ax_wind.plot(dsxz['ve'][:,iprof], dsxz.zcr[:,iprof], lw=lw_wind, ls='--', color=cv, label=r'v$_{env}$')
     #cmb ax_wind.plot(dsxz['v'][:,iprof], dsxz.zcr[:,iprof], lw=lws_wind, ls='-', color=cv, label=r'v$_{mtn}$')
+    
     ax_wind.set_xlabel('(u,v) / m$\,$s$^{-1}$')
     ax_wind.set_ylabel('altitude z / km')
     ax_wind.set_ylim(zlim)
@@ -280,7 +278,7 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     ax_wind.tick_params(axis='x', which='both', top=True, bottom=True, labelbottom=False, labeltop=True, labelleft=True)
     ax_wind.xaxis.set_minor_locator(AutoMinorLocator())
     ax_wind.yaxis.set_minor_locator(AutoMinorLocator())
-    ax_wind.legend(loc="lower left", fontsize=8, markerscale=0.5, handlelength=1, handletextpad=0.1)
+    ax_wind.legend(loc="lower left", fontsize=10)
     ax_wind.grid()
     ax_wind.text(xpp, ypp, numb_str[ipp], transform=ax_wind.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     ipp += 1
@@ -315,8 +313,8 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     else:
         zcr = dsxz['zcr'][:,iprof].values
         tloc, tenv = plt_helper.get_eulag_t_and_tenv(dsxz['thprime'][:,iprof].values, dsxz['the'][:,iprof].values, dsxz['pprime'][:,iprof].values, dsxz['ppe'][:,iprof].values, ds.cap, ds.pref00)
-        ax_t.plot(tloc, zcr, lw=lw2, ls='-', color="coral")
-        ax_t.plot(tenv, zcr, lw=1.5, ls='--', color="coral")
+        ax_t.plot(tenv, zcr, lw=1.5, ls='--', color="coral", label=r'T$_{env}$')
+        ax_t.plot(tloc, zcr, lw=lw2, ls='-', color="coral", label=r'T$_{vlidar}$')
         ax_t.set_xlabel('T / K')
         ax_t.set_xlim([155,295])
 
@@ -328,6 +326,8 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
             ax_t.plot(x,y0,lw=1.5,ls='--',color='k')
             ax_t.plot(x,y1,lw=1.5,ls='--',color='k')
             ax_t.text(x[0]-15, y0[0]+2, "-9.8 K/km", horizontalalignment='center') # weight='bold'
+
+    ax_t.legend(loc="lower left", fontsize=10)
 
     ## tgrad = np.gradient(tloc,zcr)
     ## tprime = tloc-tte
@@ -346,78 +346,18 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     ipp += 1
     xpp = 0.96
     
-    ############## SLICES ##############
+    ############## PANEL C ##############
     """Plot xz-slice"""
     ax0, contf_1 = plt_xzslc(ax0, dsxz, ds, var=var1)
     ax0.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
     if var == 'alima_x' or var == 'alima_y':
         ax0.text(dslid.xpos, zlim[0] + 7, '✈', fontsize=30, fontname='DejaVu Sans', ha='center', va='center')
-    ax0.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
-    # ax0.axhline(y=ds_xyslices[1].zpos, color='black', lw=lw1, ls='--')
     ax0.text(xpp, ypp, numb_str[ipp], transform=ax0.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
+    hrs, rem = divmod(dslid.time[t].values*3600, 3600)
+    mins, secs = divmod(rem, 60)
+    ax0.text(1-xpp, ypp, f"Time: {int(hrs):02d}:{int(mins):02d}:{int(secs):02d}s ({t:03d})", transform=ax0.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     ipp += 1
-
-    """Plot virtual lidars"""
-    axlid, contf_3 = plot_vlidar(axlid, dslid, ds, var=var3, t=t)
-    axlid.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
-
-    axlid.text(xpp, ypp, numb_str[ipp], transform=axlid.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
-    ipp += 1
-        
-    """Plot SLICES"""
-    ax1, contf_1 = plt_xyslc(ax1, ds_xyslices[0], ds, var=var1)
-    ax1.axhline(y=dslid.ypos, color='black', lw=lw1, ls='--')
-    ax1.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
-    # ax1.text(dslid.xpos, dslid.ypos, "d", weight='bold', fontsize=8, bbox={"boxstyle" : "circle", "lw":0.4, "facecolor":"white", "edgecolor":"black"})
-    ax1.set_ylabel('spanwise y / km')
-
-    ## - AXES 2 - ##
-    if var == 'amtm':        
-        ax2, contf_2 = plt_xyslc(ax2, ds_xyslices[3], ds, var=var2)
-        ax2.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
-        ax2.axhline(y=dslid.ypos, color='black', lw=lw1, ls='--')
-        # amtm_domain = 200 
-        # ax2.set_xlim(dslid.xpos-amtm_domain/2, dslid.xpos+amtm_domain/2)
-        # ax2.set_ylim(dslid.ypos-amtm_domain/2, dslid.ypos+amtm_domain/2)
-    elif var == 'alima_x' or var == 'alima_y':
-        ax2, contf_2 = plt_yzslc(ax2, dsyz, ds, var=var2)
-        ax2.axvline(x=dslid.ypos, color='black', lw=lw1, ls='--')
-        ax2.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
-        ax2.text(dslid.ypos, zlim[0] + 7, '✈', fontsize=30, fontname='DejaVu Sans', ha='center', va='center')
-    else:
-        ax2, contf_2 = plt_xzslc(ax2, dsxz, ds, var=var2)
-        ax2.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
-        ax2.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
-    ax2.xaxis.set_label_position('bottom')
-    ax2.tick_params(labelleft=False, labeltop=False, labelbottom=True)
-
-    ## - AXES 3 (bottom left) - ##
-    # ax3, _ = plt_yzslc(ax3, dsyz, ds, var='w')
-    # ax3.axvline(x=dslid.ypos, color='black', lw=lw1, ls='--')
-    # ax3.axhline(y=ds_xyslices[0].zpos, color='black', lw=lw1, ls='--')
-    # ax3.set_ylabel('altitude z / km')
-
-    if var == 'amtm':
-        ax3, _ = plt_amtm(ax3, ds_xyslices[1:6], ds, dslid)
-    elif var == 'alima_x'  or var == 'alima_y':
-        ax3, _ = plt_xyslc(ax3, ds_xyslices[1], ds, var=var3)
-    else:
-        ax3, _ = plt_xyslc(ax3, ds_xyslices[0], ds, var=var3)
-    ax3.axvline(x=dslid.xpos, color='black', lw=lw1, ls='--')
-    ax3.axhline(y=dslid.ypos, color='black', lw=lw1, ls='--')
-    ax3.set_ylabel('spanwise y / km')
-
-    ax3.tick_params(labelleft=False,labelright=True, labeltop=False, labelbottom=True)
-    ax3.yaxis.set_label_position('right')
-    ax3.xaxis.set_label_position('bottom')
-    ############## SLICES ##############
-
-    ax1.text(xpp, ypp, numb_str[ipp], transform=ax1.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
-    ipp += 1
-    ax2.text(xpp, ypp, numb_str[ipp], transform=ax2.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
-    ipp += 1
-    ax3.text(xpp, ypp, numb_str[ipp], transform=ax3.transAxes, horizontalalignment='right', weight='bold', bbox={"boxstyle" : "circle", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
-    ipp += 1
+    ############## PANEL C ##############
 
     # - Sponge layer - #
     # if zsponge[0] > 0:
@@ -429,19 +369,18 @@ def slc_and_lid(t, var, fpath, slices, dslid, image_folder, pbar, sema):
     # ax2.fill_between(xsponge, [ds.ycr[0,0]+ds.dyab/1000,ds.ycr[0,0]+ds.dyab/1000], [ds.ycr[0,0],ds.ycr[0,0]], facecolor=csponge, alpha=alpha_sponge)
     # ax2.fill_between(xsponge, [ds.ycr[-1,0],ds.ycr[-1,0]], [ds.ycr[-1,0]-ds.dyab/1000,ds.ycr[-1,0]-ds.dyab/1000], facecolor=csponge, alpha=alpha_sponge)
 
-    """Colorbar"""
-    fig.colorbar(contf_1, ax=axes[-1,0], location='bottom', shrink=0.8, fraction=1, ticks=myclevl[var1], label=mylabel[var1], pad=0, extend='both', aspect=30) #  pad=0.15 default
-
-    if var2=="vorticity":
-        fmt = matplotlib.ticker.ScalarFormatter(useMathText=True)
-        fmt.set_powerlimits((-3,-3))
-    else:
-        fmt = matplotlib.ticker.ScalarFormatter()
-    fig.colorbar(contf_2, ax=axes[-1,1], location='bottom', shrink=0.8, fraction=1, ticks=myclevl[var2], label=mylabel[var2], format=fmt, pad=0, extend='both', aspect=30) #  pad=0.15 default
-    # cbar.set_ticks([],minor=True)
-
-    fig.colorbar(contf_3, ax=axes[-1,2], location='bottom', shrink=0.8, fraction=1, ticks=myclevl[var3], label=mylabel[var3], pad=0, extend='both', aspect=30) #  pad=0.15 default
-    # cbar.formatter.set_scientific(True)
+    """Colorbar (only first variable)"""
+    fig.colorbar(
+        contf_1,
+        ax=ax_cbar,
+        location='bottom',
+        shrink=0.85,
+        fraction=1,
+        # pad=0.08,
+        ticks=myclevl[var1],
+        label=mylabel[var1],
+        extend='both'
+    )
 
     """Save figure"""
     os.makedirs(image_folder,exist_ok=True)
@@ -513,7 +452,7 @@ def plt_xzslc(ax, dsxz, ds, var='w'):
     ax.set_xlim(xlim)
     ax.set_ylim(zlim)
     ax.tick_params(which='both', top=True, right=True, bottom=False, labelbottom=False, labeltop=True, labelleft=False, labelright=False)
-    ax.text(1-xpp, ypp, f"y: {dsxz.ypos}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
+    # ax.text(1-xpp, ypp, f"y: {dsxz.ypos}km", transform=ax.transAxes, weight='bold', bbox={"boxstyle" : "round", "lw":0.67, "facecolor":"white", "edgecolor":"black"})
     return ax, contf
 
 
@@ -836,7 +775,6 @@ if __name__ == '__main__':
     ncpus = 75
     fpath = os.path.join(data_folder, simulation)
     image_folder = os.path.join(animation_folder, simulation) + "_" + var
-    # shutil.rmtree(image_folder, ignore_errors=True)
     if os.path.isdir(image_folder):
         for png_file in glob.glob(os.path.join(image_folder, "*.png")):
             try:
@@ -857,6 +795,10 @@ if __name__ == '__main__':
         # xlid = 40 # DARWIN
         xlim_lid = [2.5, 4] #h
         slices = {"x": 0, "y": 0, "z": [2]} # 7
+    elif region=="pata":
+        xlid = -270
+        slices = {"x": 0, "y": 0, "z": [5]} # 7
+        xlim_lid = [0, 12] #h
     else:
         xlid = 0
         slices = {"x": 0, "y": 0, "z": [5]} # 7
@@ -865,8 +807,11 @@ if __name__ == '__main__':
     if var=='vortex':
         xlim_lid = [3.5, 6.25] #h
         xlim_lid = [3.25, 5.5] #h
+        # xlim_lid = [0,5] # fitz roy
         # slices = {"x": 0, "y": 1, "z": [8]} # 8 is good, 12 highest
         slices = {"x": 0, "y": 0, "z": [8]} # 8 is good, 12 highest
+        # slices = {"x": 0, "y": 1, "z": [1]} # fitz roy
+
     elif var=='surf':
         xlim_lid = [0, 4] #h
     if var=='amtm':
@@ -917,6 +862,7 @@ if __name__ == '__main__':
         trange = [len(dsxz.time.values)-1]
         trange = [985]
         trange = [932]
+        trange = [580]
     print(f"Plotting time steps {trange[0]} to {trange[-1]}")
 
     """Parallel processing"""
@@ -945,4 +891,4 @@ if __name__ == '__main__':
     for proc in running_procs:
         proc.join()
 
-    plt_helper.create_animation(image_folder, "anime_slc_" + simulation + "_" + var + ".mp4")
+    plt_helper.create_animation(image_folder, "anime_abc_" + simulation + "_" + var + ".mp4")
