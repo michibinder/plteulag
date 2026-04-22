@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "plteulag"
+type: software
+authors:
+  - family-names: "Binder"
+    given-names: "Michael"
+    email: "michael.binder94@gmail.com"
+repository-code: "https://github.com/michibinder/mb-pytools-dlr"
+url: "https://github.com/michibinder/mb-pytools-dlr"
+license: "AGPL-3.0-or-later"
+abstract: "Visualization software for NETCDF output of the numerical flow solvers PMAP and EULAG and relevant measurements."
+keywords:
+  - "PMAP"
+  - "EULAG"
+  - "NetCDF"
+  - "visualization"
+  - "plotting"
+  - "atmospheric science"
